@@ -1,10 +1,19 @@
 from __future__ import absolute_import, print_function
 
+import logging
 import posixpath
 
-from sentry.models import Project
+from sentry.models import Project, EventError
 from sentry.plugins import Plugin2
 from sentry.lang.native.symbolizer import Symbolizer, have_symsynd
+from sentry.models.dsymfile import SDK_MAPPING
+
+
+logger = logging.getLogger(__name__)
+
+
+def append_error(data, err):
+    data.setdefault('errors', []).append(err)
 
 
 def exception_from_apple_error_or_diagnosis(error, diagnosis=None):
@@ -95,6 +104,29 @@ def inject_apple_backtrace(data, frames, diagnosis=None, error=None,
     data['sentry.interfaces.Stacktrace'] = stacktrace
 
 
+def inject_apple_device_data(data, system):
+    container = data.setdefault('device', {})
+    try:
+        container['name'] = SDK_MAPPING[system['system_name']]
+    except LookupError:
+        container['name'] = system.get('system_name') or 'Generic Apple'
+
+    if 'system_version' in system:
+        container['version'] = system['system_version']
+    if 'os_version' in system:
+        container['build'] = system['os_version']
+
+    extra = container.setdefault('data', {})
+    if 'cpu_arch' in system:
+        extra['cpu_arch'] = system['cpu_arch']
+    if 'model' in system:
+        extra['device_model_id'] = system['model']
+    if 'machine' in system:
+        extra['device_model'] = system['machine']
+    if 'kernel_version' in system:
+        extra['kernel_version'] = system['kernel_version']
+
+
 def preprocess_apple_crash_event(data):
     crash_report = data.get('sentry.interfaces.AppleCrashReport')
     if crash_report is None:
@@ -110,16 +142,30 @@ def preprocess_apple_crash_event(data):
         if thread['crashed']:
             crashed_thread = thread
     if crashed_thread is None:
-        return
+        append_error(data, {
+            'type': EventError.NATIVE_NO_CRASHED_THREAD,
+        })
 
-    system = crash_report.get('system')
-    sym = Symbolizer(project, crash_report['binary_images'],
-                     threads=[crashed_thread])
-    with sym:
-        bt = sym.symbolize_backtrace(crashed_thread['backtrace']['contents'],
-                                     system)
-        inject_apple_backtrace(data, bt, crash.get('diagnosis'),
-                               crash.get('error'), system)
+    else:
+        system = crash_report.get('system')
+        try:
+            sym = Symbolizer(project, crash_report['binary_images'],
+                             threads=[crashed_thread])
+            with sym:
+                bt = sym.symbolize_backtrace(
+                    crashed_thread['backtrace']['contents'], system)
+                inject_apple_backtrace(data, bt, crash.get('diagnosis'),
+                                       crash.get('error'), system)
+        except Exception as e:
+            logger.exception('Failed to symbolicate')
+            append_error(data, {
+                'type': EventError.NATIVE_INTERNAL_FAILURE,
+                'error': '%s: %s' % (e.__class__.__name__, str(e)),
+            })
+            return
+
+    if system:
+        inject_apple_device_data(data, system)
 
     return data
 
