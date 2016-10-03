@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import logging
+import six
 
 from django.contrib import messages
 from django.core.context_processors import csrf
@@ -12,14 +13,19 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.generic import View
 from sudo.views import redirect_to_sudo
 
+from sentry import roles
 from sentry.auth import access
 from sentry.models import (
-    Organization, OrganizationMember, OrganizationStatus, Project, ProjectStatus,
-    Team, TeamStatus
+    AuditLogEntry, Organization, OrganizationMember, OrganizationStatus, Project,
+    ProjectStatus, Team, TeamStatus
 )
-from sentry.web.helpers import get_login_url, render_to_response
+from sentry.utils import auth
+from sentry.web.helpers import render_to_response
 
 ERR_MISSING_SSO_LINK = _('You need to link your account with the SSO provider to continue.')
+
+logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger('sentry.audit.ui')
 
 
 class OrganizationMixin(object):
@@ -60,9 +66,8 @@ class OrganizationMixin(object):
                     if active_organization.status != OrganizationStatus.VISIBLE:
                         raise Organization.DoesNotExist
                 except Organization.DoesNotExist:
-                    logging.info('Active organization [%s] not found',
-                                 organization_slug)
-                    return None
+                    logger.info('Active organization [%s] not found',
+                        organization_slug)
 
         if active_organization is None:
             organizations = Organization.objects.get_for_user(
@@ -71,13 +76,13 @@ class OrganizationMixin(object):
 
         if active_organization is None and organization_slug:
             try:
-                active_organization = (
+                active_organization = six.next(
                     o for o in organizations
                     if o.slug == organization_slug
-                ).next()
+                )
             except StopIteration:
-                logging.info('Active organization [%s] not found in scope',
-                             organization_slug)
+                logger.info('Active organization [%s] not found in scope',
+                    organization_slug)
                 if is_implicit:
                     del request.session['activeorg']
                 active_organization = None
@@ -89,7 +94,7 @@ class OrganizationMixin(object):
             try:
                 active_organization = organizations[0]
             except IndexError:
-                logging.info('User is not a member of any organizations')
+                logger.info('User is not a member of any organizations')
                 pass
 
         if active_organization and self._is_org_member(request.user, active_organization):
@@ -137,6 +142,19 @@ class OrganizationMixin(object):
             return None
 
         return project
+
+    def redirect_to_org(self, request):
+        from sentry import features
+
+        # TODO(dcramer): deal with case when the user cannot create orgs
+        organization = self.get_active_organization(request)
+        if organization:
+            url = reverse('sentry-organization-home', args=[organization.slug])
+        elif not features.has('organizations:create'):
+            return self.respond('sentry/no-organization-access.html', status=403)
+        else:
+            url = reverse('sentry-create-organization')
+        return HttpResponseRedirect(url)
 
 
 class BaseView(View, OrganizationMixin):
@@ -187,12 +205,12 @@ class BaseView(View, OrganizationMixin):
         )
 
     def handle_auth_required(self, request, *args, **kwargs):
-        request.session['_next'] = request.get_full_path()
+        auth.initiate_login(request, next_url=request.get_full_path())
         if 'organization_slug' in kwargs:
             redirect_to = reverse('sentry-auth-organization',
                                   args=[kwargs['organization_slug']])
         else:
-            redirect_to = get_login_url()
+            redirect_to = auth.get_login_url()
         return self.redirect(redirect_to)
 
     def is_sudo_required(self, request, *args, **kwargs):
@@ -209,7 +227,7 @@ class BaseView(View, OrganizationMixin):
         return self.redirect(redirect_uri)
 
     def get_no_permission_url(request, *args, **kwargs):
-        return reverse('sentry')
+        return reverse('sentry-login')
 
     def get_context_data(self, request, **kwargs):
         context = csrf(request)
@@ -232,6 +250,28 @@ class BaseView(View, OrganizationMixin):
             user=user,
             with_projects=True,
         )
+
+    def create_audit_entry(self, request, transaction_id=None, **kwargs):
+        entry = AuditLogEntry.objects.create(
+            actor=request.user if request.user.is_authenticated() else None,
+            # TODO(jtcunning): assert that REMOTE_ADDR is a real IP.
+            ip_address=request.META['REMOTE_ADDR'],
+            **kwargs
+        )
+        extra = {
+            'ip_address': entry.ip_address,
+            'organization_id': entry.organization_id,
+            'object_id': entry.target_object,
+            'entry_id': entry.id,
+            'actor_label': entry.actor_label
+        }
+
+        if transaction_id is not None:
+            extra['transaction_id'] = transaction_id
+
+        audit_logger.info(entry.get_event_display(), extra=extra)
+
+        return entry
 
 
 class OrganizationView(BaseView):
@@ -262,8 +302,8 @@ class OrganizationView(BaseView):
         if self.valid_sso_required and not request.access.sso_is_valid:
             return False
         if self.required_scope and not request.access.has_scope(self.required_scope):
-            logging.info('User %s does not have %s permission to access organization %s',
-                         request.user, self.required_scope, organization)
+            logger.info('User %s does not have %s permission to access organization %s',
+                request.user, self.required_scope, organization)
             return False
         return True
 
@@ -299,7 +339,7 @@ class OrganizationView(BaseView):
             and self.valid_sso_required and not request.access.sso_is_valid
         )
 
-        request.session['_next'] = request.get_full_path()
+        auth.initiate_login(request, next_url=request.get_full_path())
 
         if needs_link:
             messages.add_message(
@@ -321,6 +361,27 @@ class OrganizationView(BaseView):
         kwargs['organization'] = active_organization
 
         return (args, kwargs)
+
+    def get_allowed_roles(self, request, organization, member=None):
+        can_admin = request.access.has_scope('member:delete')
+
+        allowed_roles = []
+        if can_admin and not request.is_superuser():
+            acting_member = OrganizationMember.objects.get(
+                user=request.user,
+                organization=organization,
+            )
+            if member and roles.get(acting_member.role).priority < roles.get(member.role).priority:
+                can_admin = False
+            else:
+                allowed_roles = [
+                    r for r in roles.get_all()
+                    if r.priority <= roles.get(acting_member.role).priority
+                ]
+                can_admin = bool(allowed_roles)
+        elif request.is_superuser():
+            allowed_roles = roles.get_all()
+        return (can_admin, allowed_roles,)
 
 
 class TeamView(OrganizationView):
@@ -346,12 +407,12 @@ class TeamView(OrganizationView):
             return rv
         if self.required_scope:
             if not request.access.has_team_scope(team, self.required_scope):
-                logging.info('User %s does not have %s permission to access team %s',
-                             request.user, self.required_scope, team)
+                logger.info('User %s does not have %s permission to access team %s',
+                    request.user, self.required_scope, team)
                 return False
         elif not request.access.has_team(team):
-            logging.info('User %s does not have access to team %s',
-                         request.user, team)
+            logger.info('User %s does not have access to team %s',
+                request.user, team)
             return False
         return True
 
@@ -402,12 +463,12 @@ class ProjectView(TeamView):
             return rv
         if self.required_scope:
             if not request.access.has_team_scope(team, self.required_scope):
-                logging.info('User %s does not have %s permission to access project %s',
-                             request.user, self.required_scope, project)
+                logger.info('User %s does not have %s permission to access project %s',
+                    request.user, self.required_scope, project)
                 return False
         elif not request.access.has_team(team):
-            logging.info('User %s does not have access to project %s',
-                         request.user, project)
+            logger.info('User %s does not have access to project %s',
+                request.user, project)
             return False
         return True
 

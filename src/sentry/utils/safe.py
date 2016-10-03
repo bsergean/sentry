@@ -26,20 +26,17 @@ def safe_execute(func, *args, **kwargs):
                 result = func(*args, **kwargs)
         else:
             result = func(*args, **kwargs)
-    except Exception as exc:
+    except Exception as e:
         if hasattr(func, 'im_class'):
             cls = func.im_class
         else:
             cls = func.__class__
 
-        func_name = getattr(func, '__name__', str(func))
+        func_name = getattr(func, '__name__', six.text_type(func))
         cls_name = cls.__name__
 
-        logger = logging.getLogger('sentry.safe')
-        logger.error(
-            'Error processing %r on %r: %s', func_name, cls_name, exc,
-            exc_info=True,
-        )
+        logger = logging.getLogger('sentry.safe.%s' % (cls_name.lower(),))
+        logger.error('%s.process_error', func_name, exc_info=True, extra={'exception': e})
     else:
         return result
 
@@ -64,7 +61,7 @@ def trim(value, max_size=settings.SENTRY_MAX_VARIABLE_SIZE, max_depth=3,
     elif isinstance(value, dict):
         result = {}
         _size += 2
-        for k, v in value.iteritems():
+        for k, v in six.iteritems(value):
             trim_v = trim(v, _size=_size, **options)
             result[k] = trim_v
             _size += len(six.text_type(trim_v)) + 1
@@ -105,7 +102,7 @@ def trim_pairs(iterable, max_items=settings.SENTRY_MAX_DICTIONARY_ITEMS, **kwarg
 
 def trim_dict(value, max_items=settings.SENTRY_MAX_DICTIONARY_ITEMS, **kwargs):
     max_items -= 1
-    for idx, key in enumerate(value.keys()):
+    for idx, key in enumerate(list(iter(value))):
         value[key] = trim(value[key], **kwargs)
         if idx > max_items:
             del value[key]

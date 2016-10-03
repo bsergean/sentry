@@ -4,9 +4,11 @@ import ApiMixin from '../../mixins/apiMixin';
 import DropdownLink from '../../components/dropdownLink';
 import GroupState from '../../mixins/groupState';
 import IndicatorStore from '../../stores/indicatorStore';
+import IssuePluginActions from '../../components/group/issuePluginActions';
 import MenuItem from '../../components/menuItem';
 import LinkWithConfirmation from '../../components/linkWithConfirmation';
 import TooltipMixin from '../../mixins/tooltip';
+import {defined} from '../../utils';
 import {t} from '../../locale';
 
 const Snooze = {
@@ -14,6 +16,7 @@ const Snooze = {
   '30MINUTES': 30,
   '2HOURS': 60 * 2,
   '24HOURS': 60 * 24,
+  'ONEWEEK': 60 * 24 * 7,
 };
 
 const GroupActions = React.createClass({
@@ -95,7 +98,7 @@ const GroupActions = React.createClass({
       snoozeClassName += ' active';
     }
 
-    let hasRelease = group.tags.filter(item => item.key === 'release').length;
+    let hasRelease = defined(group.lastRelease);
     let releaseTrackingUrl = '/' + this.getOrganization().slug + '/' + this.getProject().slug + '/settings/release-tracking/';
 
     return (
@@ -171,6 +174,9 @@ const GroupActions = React.createClass({
                 <a onClick={this.onSnooze.bind(this, Snooze['24HOURS'])}>{t('for 24 hours')}</a>
               </MenuItem>
               <MenuItem noAnchor={true}>
+                <a onClick={this.onSnooze.bind(this, Snooze.ONEWEEK)}>{t('for 1 week')}</a>
+              </MenuItem>
+              <MenuItem noAnchor={true}>
                 <a onClick={this.onUpdate.bind(this, {status: 'muted'})}>{t('forever')}</a>
               </MenuItem>
             </DropdownLink>
@@ -218,6 +224,9 @@ const GroupActions = React.createClass({
             );
           })
         }
+        {group.pluginIssues && group.pluginIssues.map((plugin) => {
+          return <IssuePluginActions key={plugin.slug} plugin={plugin}/>;
+        })}
       </div>
     );
   }

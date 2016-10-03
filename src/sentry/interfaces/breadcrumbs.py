@@ -10,34 +10,12 @@ from __future__ import absolute_import
 
 __all__ = ('Breadcrumbs',)
 
-import pytz
-from datetime import datetime
+import six
 
 from sentry.interfaces.base import Interface, InterfaceValidationError
+from sentry.utils import json
 from sentry.utils.safe import trim
-from sentry.utils.dates import to_timestamp, to_datetime
-
-
-def parse_new_timestamp(value):
-    # TODO(mitsuhiko): merge this code with coreapis date parser
-    if isinstance(value, datetime):
-        return value
-    elif isinstance(value, (int, long, float)):
-        return datetime.utcfromtimestamp(value).replace(tzinfo=pytz.utc)
-    value = (value or '').rstrip('Z').encode('ascii', 'replace').split('.', 1)
-    if not value:
-        return None
-    try:
-        rv = datetime.strptime(value[0], '%Y-%m-%dT%H:%M:%S')
-    except Exception:
-        return None
-    if len(value) == 2:
-        try:
-            rv = rv.replace(microsecond=int(value[1]
-                            .ljust(6, '0')[:6]))
-        except ValueError:
-            rv = None
-    return rv.replace(tzinfo=pytz.utc)
+from sentry.utils.dates import to_timestamp, to_datetime, parse_timestamp
 
 
 def _get_implied_category(category, type):
@@ -55,8 +33,7 @@ def _get_implied_category(category, type):
 
 class Breadcrumbs(Interface):
     """
-    This interface stores informationt that leads up to an error in the
-    database.
+    This interface stores information that leads up to an error.
 
     - ``message`` must be no more than 1000 characters in length.
 
@@ -76,13 +53,19 @@ class Breadcrumbs(Interface):
     def to_python(cls, data):
         values = []
         for crumb in data.get('values') or ():
-            values.append(cls.normalize_crumb(crumb))
+            try:
+                values.append(cls.normalize_crumb(crumb))
+            except InterfaceValidationError:
+                # TODO(dcramer): we dont want to discard the entirety of data
+                # when one breadcrumb errors, but it'd be nice if we could still
+                # record an error
+                continue
         return cls(values=values)
 
     @classmethod
     def normalize_crumb(cls, crumb):
         ty = crumb.get('type') or 'default'
-        ts = parse_new_timestamp(crumb.get('timestamp'))
+        ts = parse_timestamp(crumb.get('timestamp'))
         if ts is None:
             raise InterfaceValidationError('Unable to determine timestamp '
                                            'for crumb')
@@ -98,18 +81,32 @@ class Breadcrumbs(Interface):
 
         msg = crumb.get('message')
         if msg is not None:
-            rv['message'] = trim(unicode(msg), 4096)
+            rv['message'] = trim(six.text_type(msg), 4096)
 
         category = crumb.get('category')
         if category is not None:
-            rv['category'] = trim(unicode(category), 256)
+            rv['category'] = trim(six.text_type(category), 256)
 
         event_id = crumb.get('event_id')
         if event_id is not None:
             rv['event_id'] = event_id
 
-        if 'data' in crumb:
-            rv['data'] = trim(crumb['data'], 4096)
+        if crumb.get('data'):
+            try:
+                for key, value in six.iteritems(crumb['data']):
+                    if not isinstance(value, six.string_types):
+                        crumb['data'][key] = json.dumps(value)
+            except AttributeError:
+                # TODO(dcramer): we dont want to discard the the rest of the
+                # crumb, but it'd be nice if we could record an error
+                # raise InterfaceValidationError(
+                #     'The ``data`` on breadcrumbs must be a mapping (received {})'.format(
+                #         type(crumb['data']),
+                #     )
+                # )
+                pass
+            else:
+                rv['data'] = trim(crumb['data'], 4096)
 
         return rv
 
@@ -131,5 +128,5 @@ class Breadcrumbs(Interface):
                 'event_id': x.get('event_id'),
             }
         return {
-            'values': map(_convert, self.values),
+            'values': [_convert(v) for v in self.values],
         }

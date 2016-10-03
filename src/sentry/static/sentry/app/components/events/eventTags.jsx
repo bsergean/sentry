@@ -7,6 +7,8 @@ import PropTypes from '../../proptypes';
 import EventDataSection from './eventDataSection';
 import {isUrl} from '../../utils';
 import {t} from '../../locale';
+import Pills from '../pills';
+import Pill from '../pill';
 
 const EventTags = React.createClass({
   propTypes: {
@@ -28,11 +30,11 @@ const EventTags = React.createClass({
           event={this.props.event}
           title={t('Tags')}
           type="tags">
-        <ul className="mini-tag-list">
+        <Pills>
           {tags.map((tag) => {
             return (
-              <li key={tag.key}>
-                {tag.key} = <Link
+              <Pill key={tag.key} name={tag.key}>
+                <Link
                   to={`/${orgId}/${projectId}/`}
                   query={{query: `${tag.key}:"${tag.value}"`}}>
                   {tag.value}
@@ -42,10 +44,10 @@ const EventTags = React.createClass({
                     <em className="icon-open" />
                   </a>
                 }
-              </li>
+              </Pill>
             );
           })}
-        </ul>
+        </Pills>
       </EventDataSection>
     );
   }

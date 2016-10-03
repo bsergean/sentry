@@ -12,10 +12,13 @@ class ErrorEvent(BaseEvent):
         return 'sentry.interfaces.Exception' in self.data
 
     def get_metadata(self):
-        exception = self.data['sentry.interfaces.Exception']['values'][0]
+        exception = self.data['sentry.interfaces.Exception']['values'][-1]
 
         # in some situations clients are submitting non-string data for these
         return {
             'type': trim(exception.get('type', 'Error'), 128),
             'value': trim(exception.get('value', ''), 1024),
         }
+
+    def to_string(self, metadata):
+        return u'{}: {}'.format(metadata['type'], metadata['value'])

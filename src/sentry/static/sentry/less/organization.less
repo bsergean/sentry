@@ -442,34 +442,37 @@ table.project-list {
   }
 }
 
-.api-key-detail {
-  .scopes {
-    padding-bottom: 20px;
-    .clearfix();
+.api-key-detail .scopes {
+  padding-bottom: 20px;
+}
 
-    label {
+
+.api-key-detail .scopes,
+.control-group .control-list {
+  .clearfix();
+
+  label {
+    display: block;
+    width: 25%;
+    padding: 0 20px 0 30px;
+    float: left;
+    position: relative;
+
+    &.control-label {
+      font-size: 14px;
+      padding: 0 0 10px;
+      margin-bottom: 20px;
       display: block;
-      width: 25%;
-      padding: 0 20px 0 30px;
-      float: left;
-      position: relative;
-
-      &.control-label {
-        font-size: 14px;
-        padding: 0 0 10px;
-        margin-bottom: 20px;
-        display: block;
-        width: 100%;
-        float: none;
-        border-bottom: 1px solid lighten(@trim, 6);
-      }
+      width: 100%;
+      float: none;
+      border-bottom: 1px solid lighten(@trim, 6);
     }
-
-    .checkbox, .checkbox + .checkbox {
-      margin: 0 0 15px;
-    }
-
   }
+
+  .checkbox, .checkbox + .checkbox {
+    margin: 0 0 15px;
+  }
+
 }
 
 /**
@@ -483,6 +486,7 @@ table.project-list {
   }
 }
 
+
 /**
 * Stats Column
 * ============================================================================
@@ -492,6 +496,45 @@ table.project-list {
   .stats-link {
     display: block;
     font-size: 85%;
+  }
+}
+
+.organization-stats {
+  height: 150px;
+  margin-bottom: 20px;
+
+  .bar-chart figure a {
+    height: 150px;
+
+    span {
+      &.accepted {
+        background: @gray-lightest;
+      }
+
+      &.rate-limited {
+        background: @red;
+        min-height: 0;
+      }
+
+      &.black-listed {
+        background: @orange-light;
+        min-height: 0;
+      }
+    }
+
+    &:hover span {
+      &.accepted {
+        background: @gray-light;
+      }
+
+      &.rate-limited {
+        background: @red-dark;
+      }
+
+      &.black-listed {
+        background: @orange-dark;
+      }
+    }
   }
 }
 
@@ -740,6 +783,19 @@ table.project-list {
     box-shadow: 0 0 10px rgba(200, 255, 224, 0.35), 0 2px 0 rgba(0,0,0, .08);
   }
 }
+
+/**
+* Member settings / invitations
+* ============================================================================
+*/
+
+.team-choices .team-slug {
+  display: block;
+  font-style: italic;
+  font-weight: regular;
+  color: @gray-light;
+}
+
 
 /**
 * Medium to small screens

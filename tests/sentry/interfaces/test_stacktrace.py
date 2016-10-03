@@ -41,7 +41,7 @@ class StacktraceTest(TestCase):
         # objects
         event = self.event
         interface = Stacktrace.to_python(event.data['sentry.interfaces.Stacktrace'])
-        assert len(interface.frames) == 5
+        assert len(interface.frames) == 1
         assert interface == event.interfaces['sentry.interfaces.Stacktrace']
 
     def test_requires_filename(self):
@@ -139,6 +139,20 @@ class StacktraceTest(TestCase):
         }]))
         result = interface.compute_hashes('python')
         assert result == [['foo.py', 1, 'bar.py', 1], ['foo.py', 1]]
+
+    def test_get_hash_with_minimal_app_frames(self):
+        frames = [{
+            'lineno': 1,
+            'filename': 'foo.py',
+            'in_app': True,
+        }] + [{
+            'lineno': 1,
+            'filename': 'bar.py',
+            'in_app': False,
+        } for _ in range(11)]
+        interface = Stacktrace.to_python(dict(frames=frames))
+        result = interface.get_hash(system_frames=False)
+        assert not result
 
     def test_get_hash_with_only_required_vars(self):
         interface = Frame.to_python({
@@ -330,6 +344,39 @@ class StacktraceTest(TestCase):
         result = interface.get_hash()
         assert result != []
 
+    def test_get_hash_excludes_single_frame_urls(self):
+        """
+        Browser JS will often throw errors (from inlined code in an HTML page)
+        which contain only a single frame, no function name, and have the HTML
+        document as the filename.
+
+        In this case the hash is often not usable as the context cannot be
+        trusted and the URL is dynamic.
+        """
+        interface = Stacktrace.to_python({
+            'frames': [{
+                'context_line': 'hello world',
+                'abs_path': 'http://foo.com/bar/',
+                'lineno': 107,
+                'filename': '/bar/',
+                'module': '<unknown module>',
+            }],
+        })
+        result = interface.get_hash()
+        assert result == []
+
+    def test_cocoa_culprit(self):
+        stacktrace = Stacktrace.to_python(dict(frames=[
+            {
+                'filename': 'foo/baz.c',
+                'package': '/foo/bar/baz.dylib',
+                'lineno': 1,
+                'in_app': True,
+                'function': 'fooBar',
+            }
+        ]))
+        assert stacktrace.get_culprit_string(platform='cocoa') == 'fooBar (baz)'
+
     def test_get_hash_does_not_group_different_js_errors(self):
         interface = Stacktrace.to_python({
             'frames': [{
@@ -437,6 +484,19 @@ class StacktraceTest(TestCase):
             {'x': '<nan>'},
         )
 
+    def test_address_normalization(self):
+        interface = Frame.to_python({
+            'lineno': 1,
+            'filename': 'blah.c',
+            'function': 'main',
+            'instruction_addr': 123456,
+            'symbol_addr': '123450',
+            'image_addr': '0x0',
+        })
+        assert interface.instruction_addr == '0x1e240'
+        assert interface.symbol_addr == '0x1e23a'
+        assert interface.image_addr == '0x0'
+
 
 class SlimFrameDataTest(TestCase):
     def test_under_max(self):
@@ -447,7 +507,7 @@ class SlimFrameDataTest(TestCase):
 
     def test_over_max(self):
         values = []
-        for n in xrange(5):
+        for n in range(5):
             values.append({
                 'filename': 'frame %d' % n,
                 'vars': {'foo': 'bar'},
@@ -460,13 +520,13 @@ class SlimFrameDataTest(TestCase):
 
         assert len(interface.frames) == 5
 
-        for value, num in zip(interface.frames[:2], xrange(2)):
+        for value, num in zip(interface.frames[:2], range(2)):
             assert value.filename == 'frame %d' % num
             assert value.vars is not None
             assert value.pre_context is not None
             assert value.post_context is not None
 
-        for value, num in zip(interface.frames[3:], xrange(3, 5)):
+        for value, num in zip(interface.frames[3:], range(3, 5)):
             assert value.filename == 'frame %d' % num
             assert value.vars is not None
             assert value.pre_context is not None

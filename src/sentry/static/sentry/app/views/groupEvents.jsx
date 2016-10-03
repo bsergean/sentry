@@ -92,7 +92,18 @@ const GroupEvents = React.createClass({
   },
 
   getEventTitle(event) {
-    return event.message.split('\n')[0].substr(0, 100);
+    switch (event.type) {
+      case 'error':
+        if (event.metadata.type && event.metadata.value)
+          return `${event.metadata.type}: ${event.metadata.value}`;
+        return event.metadata.type || event.metadata.value || event.metadata.title;
+      case 'csp':
+        return event.metadata.message;
+      case 'default':
+        return event.metadata.title;
+      default:
+        return event.message.split('\n')[0];
+    }
   },
 
   renderNoQueryResults() {
@@ -142,7 +153,7 @@ const GroupEvents = React.createClass({
               <Link to={`/${orgId}/${projectId}/issues/${groupId}/events/${event.id}/`}>
                 <DateTime date={event.dateCreated} />
               </Link>
-              <small>{this.getEventTitle(event)}</small>
+              <small>{(this.getEventTitle(event) || '').substr(0, 100)}</small>
             </h5>
           </td>
           {tagList.map((tag) => {
@@ -156,7 +167,8 @@ const GroupEvents = React.createClass({
             <td className="event-user table-user-info">
               {event.user ?
                 <div>
-                  <Avatar user={event.user} size={64} className="avatar" />
+                  <Avatar user={event.user} size={64} className="avatar"
+                          gravatar={false} />
                   {event.user.email}
                 </div>
               :
@@ -219,7 +231,7 @@ const GroupEvents = React.createClass({
       <div>
         <div style={{marginBottom: 20}}>
           <SearchBar defaultQuery=""
-            placeholder="search event message or tags"
+            placeholder={t('search event message or tags')}
             query={this.state.query}
             onSearch={this.onSearch} />
         </div>

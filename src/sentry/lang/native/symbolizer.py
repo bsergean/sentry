@@ -1,17 +1,16 @@
-try:
-    from symsynd.driver import Driver
-    from symsynd.report import ReportSymbolizer
-    from symsynd.macho.arch import get_cpu_name
-    from symsynd.demangle import demangle_symbol
-    have_symsynd = True
-except ImportError:
-    have_symsynd = False
+from __future__ import absolute_import
 
-from sentry import options
+import six
+
+from symsynd.driver import Driver, SymbolicationError
+from symsynd.report import ReportSymbolizer
+from symsynd.macho.arch import get_cpu_name
+from symsynd.demangle import demangle_symbol
+
 from sentry.lang.native.dsymcache import dsymcache
 from sentry.utils.safe import trim
-from sentry.models import DSymSymbol
-from sentry.models.dsymfile import MAX_SYM
+from sentry.models import DSymSymbol, EventError
+from sentry.constants import MAX_SYM
 
 
 def trim_frame(frame):
@@ -21,52 +20,49 @@ def trim_frame(frame):
     return frame
 
 
-def find_system_symbol(img, instruction_addr, system_info=None):
+def find_system_symbol(img, instruction_addr, sdk_info=None):
     """Finds a system symbol."""
     return DSymSymbol.objects.lookup_symbol(
         instruction_addr=instruction_addr,
         image_addr=img['image_addr'],
+        image_vmaddr=img['image_vmaddr'],
         uuid=img['uuid'],
         cpu_name=get_cpu_name(img['cpu_type'],
                               img['cpu_subtype']),
         object_path=img['name'],
-        system_info=system_info
+        sdk_info=sdk_info
     )
 
 
-def make_symbolizer(project, binary_images, threads=None):
+def make_symbolizer(project, binary_images, referenced_images=None):
     """Creates a symbolizer for the given project and binary images.  If a
-    list of threads is referenced (from an apple crash report) then only
-    images needed by those frames are loaded.
+    list of referenced images is referenced (UUIDs) then only images
+    needed by those frames are loaded.
     """
-    if not have_symsynd:
-        raise RuntimeError('symsynd is unavailable.  Install sentry with '
-                           'the dsym feature flag.')
-    driver = Driver(options.get('dsym.llvm-symbolizer-path') or None)
+    driver = Driver()
 
-    if threads is None:
+    to_load = referenced_images
+    if to_load is None:
         to_load = [x['uuid'] for x in binary_images]
-    else:
-        image_map = {}
-        for image in binary_images:
-            image_map[image['image_addr']] = image['uuid']
-        to_load = set()
-        for thread in threads:
-            for frame in thread['backtrace']['contents']:
-                img_uuid = image_map.get(frame['object_addr'])
-                if img_uuid is not None:
-                    to_load.add(img_uuid)
-        to_load = list(to_load)
 
     dsym_paths, loaded = dsymcache.fetch_dsyms(project, to_load)
-    return ReportSymbolizer(driver, dsym_paths, binary_images)
+
+    # We only want to pass the actually loaded symbols to the report
+    # symbolizer to avoid the expensive FS operations that will otherwise
+    # happen.
+    user_images = []
+    for img in binary_images:
+        if img['uuid'] in loaded:
+            user_images.append(img)
+
+    return ReportSymbolizer(driver, dsym_paths, user_images)
 
 
 class Symbolizer(object):
 
-    def __init__(self, project, binary_images, threads=None):
-        self.symsynd_symbolizer = make_symbolizer(project, binary_images,
-                                                  threads=threads)
+    def __init__(self, project, binary_images, referenced_images=None):
+        self.symsynd_symbolizer = make_symbolizer(
+            project, binary_images, referenced_images=referenced_images)
         self.images = dict((img['image_addr'], img) for img in binary_images)
 
     def __enter__(self):
@@ -75,26 +71,72 @@ class Symbolizer(object):
     def __exit__(self, *args):
         return self.symsynd_symbolizer.driver.__exit__(*args)
 
-    def symbolize_frame(self, frame, system_info=None):
-        # Step one: try to symbolize with cached dsym files.
-        new_frame = self.symsynd_symbolizer.symbolize_frame(frame)
+    def _process_frame(self, frame, img):
+        rv = trim_frame(frame)
+        if img is not None:
+            # Only set the object name if we "upgrade" it from a filename to
+            # full path.
+            if rv.get('object_name') is None or \
+               ('/' not in rv['object_name'] and '/' in img['name']):
+                rv['object_name'] = img['name']
+            rv['uuid'] = img['uuid']
+        return rv
+
+    def symbolize_app_frame(self, frame):
+        img = self.images.get(frame['object_addr'])
+        new_frame = self.symsynd_symbolizer.symbolize_frame(
+            frame, silent=False)
         if new_frame is not None:
-            return trim_frame(new_frame)
+            return self._process_frame(new_frame, img)
+
+    def symbolize_system_frame(self, frame, sdk_info):
+        img = self.images.get(frame['object_addr'])
+        if img is None:
+            return
+
+        symbol = find_system_symbol(img, frame['instruction_addr'],
+                                    sdk_info)
+        if symbol is None:
+            return
+
+        symbol = demangle_symbol(symbol) or symbol
+        rv = dict(frame, symbol_name=symbol, filename=None,
+                  line=0, column=0, uuid=img['uuid'],
+                  object_name=img['name'])
+        return self._process_frame(rv, img)
+
+    def symbolize_frame(self, frame, sdk_info=None, report_error=None):
+        # Step one: try to symbolize with cached dsym files.
+        try:
+            rv = self.symbolize_app_frame(frame)
+            if rv is not None:
+                return rv
+        except SymbolicationError as e:
+            if report_error is not None:
+                report_error(e)
 
         # If that does not work, look up system symbols.
-        img = self.images.get(frame['object_addr'])
-        if img is not None:
-            symbol = find_system_symbol(img, frame['instruction_addr'],
-                                        system_info)
-            if symbol is not None:
-                symbol = demangle_symbol(symbol) or symbol
-                rv = dict(frame, symbol_name=symbol, filename=None,
-                          line=0, column=0, uuid=img['uuid'])
-                return trim_frame(rv)
+        rv = self.symbolize_system_frame(frame, sdk_info)
+        if rv is not None:
+            return rv
 
-    def symbolize_backtrace(self, backtrace, system_info=None):
+    def symbolize_backtrace(self, backtrace, sdk_info=None):
         rv = []
-        for frame in backtrace:
-            new_frame = self.symbolize_frame(frame, system_info)
-            rv.append(new_frame or frame)
-        return rv
+        errors = []
+        idx = -1
+
+        def report_error(e):
+            errors.append({
+                'type': EventError.NATIVE_INTERNAL_FAILURE,
+                'frame': frm,
+                'error': 'frame #%d: %s: %s' % (
+                    idx,
+                    e.__class__.__name__,
+                    six.text_type(e),
+                )
+            })
+
+        for idx, frm in enumerate(backtrace):
+            rv.append(self.symbolize_frame(
+                frm, sdk_info, report_error=report_error) or frm)
+        return rv, errors

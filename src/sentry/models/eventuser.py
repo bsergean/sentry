@@ -4,7 +4,8 @@ from django.db import models
 from django.utils import timezone
 
 from sentry.db.models import FlexibleForeignKey, Model, sane_repr
-from sentry.utils.hashlib import md5
+from sentry.utils.hashlib import md5_text
+from sentry.constants import MAX_EMAIL_FIELD_LENGTH
 
 KEYWORD_MAP = {
     'id': 'ident',
@@ -20,7 +21,7 @@ class EventUser(Model):
     project = FlexibleForeignKey('sentry.Project')
     hash = models.CharField(max_length=32)
     ident = models.CharField(max_length=128, null=True)
-    email = models.EmailField(null=True)
+    email = models.EmailField(null=True, max_length=MAX_EMAIL_FIELD_LENGTH)
     username = models.CharField(max_length=128, null=True)
     ip_address = models.GenericIPAddressField(null=True)
     date_added = models.DateTimeField(default=timezone.now, db_index=True)
@@ -50,7 +51,7 @@ class EventUser(Model):
 
     def get_hash(self):
         value = self.ident or self.username or self.email or self.ip_address
-        return md5(value).hexdigest()
+        return md5_text(value).hexdigest()
 
     @property
     def tag_value(self):

@@ -4,6 +4,7 @@ from __future__ import absolute_import
 
 import pytest
 import responses
+import six
 
 from mock import patch
 from requests.exceptions import RequestException
@@ -11,13 +12,58 @@ from requests.exceptions import RequestException
 from sentry.interfaces.stacktrace import Stacktrace
 from sentry.lang.javascript.processor import (
     BadSource, discover_sourcemap, fetch_sourcemap, fetch_file, generate_module,
-    SourceProcessor, trim_line, UrlResult
+    SourceProcessor, trim_line, UrlResult, fetch_release_file
 )
 from sentry.lang.javascript.sourcemaps import SourceMap, SourceMapIndex
-from sentry.models import Release
+from sentry.lang.javascript.errormapping import (
+    rewrite_exception, REACT_MAPPING_URL
+)
+from sentry.models import File, Release, ReleaseFile
 from sentry.testutils import TestCase
 
 base64_sourcemap = 'data:application/json;base64,eyJ2ZXJzaW9uIjozLCJmaWxlIjoiZ2VuZXJhdGVkLmpzIiwic291cmNlcyI6WyIvdGVzdC5qcyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiO0FBQUEiLCJzb3VyY2VzQ29udGVudCI6WyJjb25zb2xlLmxvZyhcImhlbGxvLCBXb3JsZCFcIikiXX0='
+
+unicode_body = u"""function add(a, b) {
+    "use strict";
+    return a + b; // fôo
+}"""
+
+
+class FetchReleaseFileTest(TestCase):
+    def test_unicode(self):
+        project = self.project
+        release = Release.objects.create(
+            project=project,
+            version='abc',
+        )
+
+        file = File.objects.create(
+            name='file.min.js',
+            type='release.file',
+            headers={'Content-Type': 'application/json; charset=utf-8'},
+        )
+        file.putfile(six.BytesIO(unicode_body.encode('utf-8')))
+
+        ReleaseFile.objects.create(
+            name='file.min.js',
+            release=release,
+            project=project,
+            file=file,
+        )
+
+        result = fetch_release_file('file.min.js', release)
+
+        assert type(result[1]) is six.text_type
+        assert result == (
+            {'Content-Type': 'application/json; charset=utf-8'},
+            unicode_body,
+            200
+        )
+
+        # test with cache hit, which should be compressed
+        new_result = fetch_release_file('file.min.js', release)
+
+        assert result == new_result
 
 
 class FetchFileTest(TestCase):
@@ -92,7 +138,7 @@ class FetchFileTest(TestCase):
         result = fetch_file('/example.js', release=release)
         assert result.url == '/example.js'
         assert result.body == 'foo'
-        assert isinstance(result.body, unicode)
+        assert isinstance(result.body, six.text_type)
         assert result.headers == {'content-type': 'application/json'}
 
     @patch('sentry.lang.javascript.processor.fetch_release_file')
@@ -107,6 +153,27 @@ class FetchFileTest(TestCase):
 
         with pytest.raises(BadSource):
             fetch_file('/example.js', release=release)
+
+    @responses.activate
+    def test_unicode_body(self):
+        responses.add(responses.GET, 'http://example.com',
+                      body=u'"fôo bar"'.encode('utf-8'),
+                      content_type='application/json; charset=utf-8')
+
+        result = fetch_file('http://example.com')
+
+        assert len(responses.calls) == 1
+
+        assert result.url == 'http://example.com'
+        assert result.body == u'"fôo bar"'
+        assert result.headers == {'content-type': 'application/json; charset=utf-8'}
+
+        # ensure we use the cached result
+        result2 = fetch_file('http://example.com')
+
+        assert len(responses.calls) == 1
+
+        assert result == result2
 
 
 class DiscoverSourcemapTest(TestCase):
@@ -139,6 +206,13 @@ class DiscoverSourcemapTest(TestCase):
 
         result = UrlResult('http://example.com', {}, 'console.log(true)\n//# sourceMappingURL=http://example.com/source.map.js\n//# sourceMappingURL=http://example.com/source2.map.js')
         assert discover_sourcemap(result) == 'http://example.com/source2.map.js'
+
+        result = UrlResult('http://example.com', {}, '//# sourceMappingURL=app.map.js/*ascii:lol*/')
+        assert discover_sourcemap(result) == 'http://example.com/app.map.js'
+
+        result = UrlResult('http://example.com', {}, '//# sourceMappingURL=/*lol*/')
+        with self.assertRaises(AssertionError):
+            discover_sourcemap(result)
 
 
 class GenerateModuleTest(TestCase):
@@ -286,3 +360,168 @@ class SourceProcessorTest(TestCase):
         processor = SourceProcessor(project=self.project)
         result = processor.process(data)
         assert result['culprit'] == 'bar in oops'
+
+    def test_ensure_module_names(self):
+        data = {
+            'message': 'hello',
+            'platform': 'javascript',
+            'sentry.interfaces.Exception': {
+                'values': [{
+                    'type': 'Error',
+                    'stacktrace': {
+                        'frames': [
+                            {
+                                'filename': 'foo.js',
+                                'lineno': 4,
+                                'colno': 0,
+                                'function': 'thing',
+                            },
+                            {
+                                'abs_path': 'http://example.com/foo/bar.js',
+                                'filename': 'bar.js',
+                                'lineno': 1,
+                                'colno': 0,
+                                'function': 'oops',
+                            },
+                        ],
+                    },
+                }],
+            }
+        }
+        processor = SourceProcessor(project=self.project)
+        result = processor.process(data)
+        exc = result['sentry.interfaces.Exception']['values'][0]
+        assert exc['stacktrace']['frames'][1]['module'] == 'foo/bar'
+
+
+class ErrorMappingTest(TestCase):
+
+    @responses.activate
+    def test_react_error_mapping_resolving(self):
+        responses.add(responses.GET, REACT_MAPPING_URL, body=r'''
+        {
+          "108": "%s.getChildContext(): key \"%s\" is not defined in childContextTypes.",
+          "109": "%s.render(): A valid React element (or null) must be returned. You may have returned undefined, an array or some other invalid object.",
+          "110": "Stateless function components cannot have refs."
+        }
+        ''', content_type='application/json')
+
+        for x in range(3):
+            data = {
+                'platform': 'javascript',
+                'sentry.interfaces.Exception': {
+                    'values': [{
+                        'type': 'InvariantViolation',
+                        'value': (
+                            'Minified React error #109; visit http://facebook'
+                            '.github.io/react/docs/error-decoder.html?invariant='
+                            '109&args[]=Component for the full message or use '
+                            'the non-minified dev environment for full errors '
+                            'and additional helpful warnings.'
+                        ),
+                        'stacktrace': {
+                            'frames': [
+                                {
+                                    'abs_path': 'http://example.com/foo.js',
+                                    'filename': 'foo.js',
+                                    'lineno': 4,
+                                    'colno': 0,
+                                },
+                                {
+                                    'abs_path': 'http://example.com/foo.js',
+                                    'filename': 'foo.js',
+                                    'lineno': 1,
+                                    'colno': 0,
+                                },
+                            ],
+                        },
+                    }],
+                }
+            }
+
+            assert rewrite_exception(data)
+
+            assert data['sentry.interfaces.Exception']['values'][0]['value'] == (
+                'Component.render(): A valid React element (or null) must be '
+                'returned. You may have returned undefined, an array or '
+                'some other invalid object.'
+            )
+
+    @responses.activate
+    def test_react_error_mapping_empty_args(self):
+        responses.add(responses.GET, REACT_MAPPING_URL, body=r'''
+        {
+          "108": "%s.getChildContext(): key \"%s\" is not defined in childContextTypes."
+        }
+        ''', content_type='application/json')
+
+        data = {
+            'platform': 'javascript',
+            'sentry.interfaces.Exception': {
+                'values': [{
+                    'type': 'InvariantViolation',
+                    'value': (
+                        'Minified React error #108; visit http://facebook'
+                        '.github.io/react/docs/error-decoder.html?invariant='
+                        '108&args[]=Component&args[]= for the full message '
+                        'or use the non-minified dev environment for full '
+                        'errors and additional helpful warnings.'
+                    ),
+                    'stacktrace': {
+                        'frames': [
+                            {
+                                'abs_path': 'http://example.com/foo.js',
+                                'filename': 'foo.js',
+                                'lineno': 4,
+                                'colno': 0,
+                            },
+                        ],
+                    },
+                }],
+            }
+        }
+
+        assert rewrite_exception(data)
+
+        assert data['sentry.interfaces.Exception']['values'][0]['value'] == (
+            'Component.getChildContext(): key "" is not defined in '
+            'childContextTypes.'
+        )
+
+    @responses.activate
+    def test_react_error_mapping_truncated(self):
+        responses.add(responses.GET, REACT_MAPPING_URL, body=r'''
+        {
+          "108": "%s.getChildContext(): key \"%s\" is not defined in childContextTypes."
+        }
+        ''', content_type='application/json')
+
+        data = {
+            'platform': 'javascript',
+            'sentry.interfaces.Exception': {
+                'values': [{
+                    'type': 'InvariantViolation',
+                    'value': (
+                        u'Minified React error #108; visit http://facebook'
+                        u'.github.io/react/docs/error-decoder.html?…'
+                    ),
+                    'stacktrace': {
+                        'frames': [
+                            {
+                                'abs_path': 'http://example.com/foo.js',
+                                'filename': 'foo.js',
+                                'lineno': 4,
+                                'colno': 0,
+                            },
+                        ],
+                    },
+                }],
+            }
+        }
+
+        assert rewrite_exception(data)
+
+        assert data['sentry.interfaces.Exception']['values'][0]['value'] == (
+            '<redacted>.getChildContext(): key "<redacted>" is not defined in '
+            'childContextTypes.'
+        )

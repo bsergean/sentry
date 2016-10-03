@@ -11,7 +11,6 @@ import petname
 import six
 
 from bitfield import BitField
-from urlparse import urlparse
 from uuid import uuid4
 
 from django.conf import settings
@@ -19,6 +18,7 @@ from django.core.urlresolvers import reverse
 from django.db import models
 from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
+from six.moves.urllib.parse import urlparse
 
 from sentry import options
 from sentry.db.models import (
@@ -34,6 +34,8 @@ class ProjectKeyStatus(object):
 
 
 class ProjectKey(Model):
+    __core__ = True
+
     project = FlexibleForeignKey('sentry.Project', related_name='key_set')
     label = models.CharField(max_length=64, blank=True, null=True)
     public_key = models.CharField(max_length=32, unique=True, null=True)
@@ -61,6 +63,7 @@ class ProjectKey(Model):
         'project:read',
         'project:write',
         'project:delete',
+        'project:releases',
         'event:read',
         'event:write',
         'event:delete',

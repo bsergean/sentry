@@ -14,13 +14,13 @@ from django.db import models
 from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
 
-from sentry.app import env
+from sentry.app import env, locks
 from sentry.db.models import (
     BaseManager, BoundedPositiveIntegerField, FlexibleForeignKey, Model,
     sane_repr
 )
 from sentry.db.models.utils import slugify_instance
-from sentry.utils.cache import Lock
+from sentry.utils.retries import TimedRetryPolicy
 
 
 class TeamManager(BaseManager):
@@ -86,6 +86,8 @@ class Team(Model):
     """
     A team represents a group of individuals which maintain ownership of projects.
     """
+    __core__ = True
+
     organization = FlexibleForeignKey('sentry.Organization')
     slug = models.SlugField()
     name = models.CharField(max_length=64)
@@ -106,15 +108,15 @@ class Team(Model):
         db_table = 'sentry_team'
         unique_together = (('organization', 'slug'),)
 
-    __repr__ = sane_repr('slug', 'name')
+    __repr__ = sane_repr('name', 'slug')
 
     def __unicode__(self):
         return u'%s (%s)' % (self.name, self.slug)
 
     def save(self, *args, **kwargs):
         if not self.slug:
-            lock_key = 'slug:team'
-            with Lock(lock_key):
+            lock = locks.get('slug:team', duration=5)
+            with TimedRetryPolicy(10)(lock.acquire):
                 slugify_instance(self, self.name, organization=self.organization)
             super(Team, self).save(*args, **kwargs)
         else:

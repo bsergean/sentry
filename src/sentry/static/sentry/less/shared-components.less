@@ -167,6 +167,12 @@ dl.flat dd {
     width: 0;
     margin-right: -6px;
   }
+
+  .icon-signal {
+    font-size: 18px;
+    position: relative;
+    top: 2px;
+  }
 }
 
 /* Small button icons */
@@ -274,47 +280,17 @@ dl.flat dd {
 */
 
 table.table {
-  table-layout: auto;
   margin-bottom: 20px;
-  border: 1px solid @trim;
-  border-radius: 3px;
-  border-spacing: 0;
-  border-collapse: separate !important;
-  background: #fff;
 
+  // No overrideable variables available
   td, th {
-    border: 0 !important;
     vertical-align: middle !important;
-    padding: 15px 20px !important;
     line-height: 1 !important;
   }
 
   th {
     font-weight: 600 !important;
-  }
-
-  tr {
-    th:first-child {
-      border-top-left-radius: 4px;
-    }
-    th:last-child {
-      border-top-right-radius: 4px;
-    }
-
-    &:first-child {
-      > td {
-        border-top: 0 !important;
-      }
-    }
-  }
-
-  th {
-    border: none !important;
-    border-bottom: 1px solid @trim !important;
-  }
-
-  td {
-    border-top: 1px solid lighten(@trim, 8) !important;
+    border-width: 1px !important;
   }
 
   .squash {
@@ -348,26 +324,11 @@ table.table {
       .square(36px);
       position: absolute;
       left: 20px;
-      top: 14px;
     }
   }
 
   &.closed {
     display: none;
-  }
-}
-
-thead + tbody {
-  tr:first-child {
-    td {
-      border: 0 !important;
-    }
-  }
-}
-
-.condition-list, .action-list {
-  th, td {
-    vertical-align: middle !important;
   }
 }
 
@@ -396,74 +357,11 @@ pre.plain {
   color: @gray;
 }
 
-table.vars {
-  margin-bottom: 0;
-  border: 0;
-
-  th, td {
-    border: none;
-    padding: 5px 8px;
-    word-break: break-all;
-    border: 1px solid #E9EBEC !important;
-  }
-
-  td .btn, th .btn {
-    white-space: nowrap
-  }
-
-  td.values, td.code {
-    overflow: hidden;
-
-    > pre {
-      background-color: inherit;
-      padding: 0;
-      border: 0;
-      margin-bottom: 0;
+table.table.table-no-top-border {
+  tr:first-child {
+    th, td {
+      border: 0 !important;
     }
-  }
-}
-
-table.table.vars {
-  margin-top: -5px;
-  border-radius: 0;
-
-  tr:first-child > td, tr:first-child > th {
-    border-top: 0 !important;
-  }
-
-  td, th {
-    padding: 12px 0 !important;
-    border: 0;
-    vertical-align: top !important;
-    border: 0 !important;
-    border-top: 1px solid #f1f2f3 !important;
-    border-radius: 0 !important;
-  }
-  td table {
-    border-top: 0;
-    margin-top: -12px;
-    margin-bottom: -10px;
-  }
-  thead th,
-  thead td {
-    background-color: #fff !important;
-  }
-  tbody > tr:nth-child(odd) > td,
-  tbody > tr:nth-child(odd) > th {
-    background-color: #fff;
-  }
-  tbody > tr:nth-child(even) > td,
-  tbody > tr:nth-child(even) > th {
-    background-color: #fff;
-  }
-}
-
-table.vars .toggle-expand {
-  border-top: 0 !important;
-  padding-top: 2px !important;
-
-  .btn {
-    background: rgba(0,0,0, .02);
   }
 }
 
@@ -784,12 +682,14 @@ table.integrations {
 
   &.success {
     background: @green;
+    color: @white;
     .icon:before {
       content: "\e60a"; // checkmark
     }
   }
   &.error {
     background: @red;
+    color: @white;
     .icon:before {
       content: "\e615"; // exclamation
     }
@@ -829,6 +729,87 @@ table.integrations {
     background-image: url(../images/sentry-loader.gif);
     .square(150px);
     background-size: contain;
+  }
+}
+
+/**
+* Switch
+* ============================================================================
+*/
+
+@switch-sm-height: 16px;
+@switch-lg-height: 24px;
+
+.switch {
+  display: inline-block;
+  border: 1px solid @trim;
+  position: relative;
+  box-shadow: inset 0 1px 1px rgba(0,0,0, .04);
+  cursor: pointer;
+  .transition(border .15s ease);
+
+  &:hover {
+    border-color: darken(@trim, 10);
+  }
+
+  .switch-toggle {
+    display: block;
+    position: absolute;
+    border-radius: 50%;
+    background: @gray-lighter;
+    .transition(all .25s ease);
+  }
+
+  &.switch-on {
+    border-color: darken(@trim, 10);
+    .switch-toggle {
+      background: @green;
+    }
+  }
+
+  &.switch-disabled {
+    cursor: not-allowed;
+    pointer-events: none
+  }
+}
+
+// To replace checkboxes
+
+.switch-sm {
+  height: @switch-sm-height;
+  width: @switch-sm-height * 2;
+  border-radius: @switch-sm-height;
+
+  .switch-toggle {
+    top: 2px;
+    left: 2px;
+    .square(@switch-sm-height - 6); // (3*2) Room for border and padding on top and bottom
+  }
+
+  &.switch-on {
+    .switch-toggle{
+      left: @switch-sm-height + 2;
+    }
+  }
+}
+
+// When you need to go slightly bigger
+
+.switch-lg {
+  height: @switch-lg-height;
+  width: @switch-lg-height * 2;
+  border-radius: @switch-lg-height;
+
+  .switch-toggle {
+    top: 4px;
+    left: 4px;
+    .square(@switch-lg-height - 10); // (10*2) Room for border and padding on top and bottom
+  }
+
+  &.switch-on {
+    .switch-toggle{
+      left: @switch-lg-height + 4;
+    }
   }
 }
 
@@ -1524,20 +1505,135 @@ table.integrations {
       border-bottom-right-radius: 3px;
     }
 
-    &:nth-child(4) {
+    &.segment-9 {
+      background-color: rgba(135, 146, 163, 0.1);
+    }
+
+    &.segment-8 {
       background-color: rgba(135, 146, 163, 0.2);
     }
 
-    &:nth-child(3) {
+    &.segment-7 {
+      background-color: rgba(135, 146, 163, 0.3);
+    }
+
+    &.segment-6 {
       background-color: rgba(135, 146, 163, 0.4);
     }
 
-    &:nth-child(2) {
+    &.segment-5 {
+      background-color: rgba(135, 146, 163, 0.5);
+    }
+
+    &.segment-4 {
       background-color: rgba(135, 146, 163, 0.6);
     }
 
-    &:nth-child(1) {
+    &.segment-3 {
+      background-color: rgba(135, 146, 163, 0.7);
+    }
+
+    &.segment-2 {
       background-color: rgba(135, 146, 163, 0.8);
+    }
+
+    &.segment-1 {
+      background-color: rgba(135, 146, 163, 0.9);
+    }
+
+    &.segment-0 {
+      background-color: rgba(135, 146, 163, 1);
+    }
+  }
+}
+
+/**
+* Faces
+* -----
+* A grid of faces for seen-by and participants list
+* ============================================================================
+*/
+
+ul.faces {
+  .list-unstyled;
+  .clearfix;
+
+  li {
+    float: left;
+    margin: 0 5px 5px 0;
+
+    .avatar {
+      .square(28px);
+    }
+  }
+}
+
+/**
+* Key value pill / lozenge
+* ============================================================================
+*/
+
+.pills {
+  .list-unstyled;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+
+  li {
+    white-space: nowrap;
+    margin: 0 15px 15px 0;
+    border-radius: 1px;
+    display: flex;
+    border: 1px solid darken(@trim, 2);
+    border-radius: 3px;
+    box-shadow: 0 1px 2px rgba(0,0,0, .02);
+    line-height: 1.2;
+    max-width: 100%;
+
+    &.true .value {
+      background: #FBFEFA;
+      border: 1px solid #C7DBBD;
+      margin: -1px;
+      color: #6A726C;
+    }
+
+    &.false .value {
+      background: #FFF9F9;
+      border: 1px solid #E5C4C4;
+      margin: -1px;
+      color: #766A6A;
+    }
+
+    &:last-child {
+      margin-right: 0;
+    }
+  }
+
+  .key, .value {
+    padding: 4px 8px;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .value {
+    background: @white-dark;
+    border-left: 1px solid @trim;
+    border-radius: 0 3px 3px 0;
+    font-family: Monaco, monospace;
+    max-width: 100%;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+    > a {
+      max-width: 100%;
+      .truncate;
+      display: inline-block;
+      line-height: 1;
+      vertical-align: text-bottom;
+    }
+
+    .external-icon {
+      display: inline;
     }
   }
 }
@@ -1921,6 +2017,19 @@ table.integrations {
     }
     .with-padding {
       padding: 10px 10px 0;
+    }
+  }
+
+  .box-collapse-margins {
+    border-radius: 2px 2px 0 0;
+
+    + .box-collapse-margins {
+      margin-top: -21px;
+      border-radius: 0;
+    }
+
+    &:last-of-type {
+      border-radius: 0 0 2px 2px;
     }
   }
 }
@@ -2487,6 +2596,56 @@ table.integrations {
 }
 
 /**
+* Label
+* ============================================================================
+*/
+
+.label.verification {
+
+  &.label-warning {
+    background-color: @yellow-orange;
+  }
+
+  &.label-success {
+    background-color: @green-light;
+  }
+
+  display: inline;
+  padding: .2em .6em .3em;
+  font-size: 75%;
+  font-weight: bold;
+  line-height: 1;
+  color: #fff;
+  text-align: center;
+  white-space: nowrap;
+  vertical-align: baseline;
+  border-radius: .25em;
+  margin-left: 4px;
+}
+
+/**
+* Circle indicators
+* ============================================================================
+*/
+
+.circle-indicator {
+  display: inline-block;
+  .square(14px);
+  border-radius: 14px;
+  margin-right: 8px;
+  position: relative;
+  top: 1px;
+
+  &.enabled {
+    background: @green;
+  }
+
+  &.disabled {
+      background: @red;
+  }
+}
+
+/**
 * Project nav
 * ============================================================================
 */
@@ -2594,7 +2753,7 @@ ul.radio-inputs {
 * ============================================================================
 */
 
-.modal-open #blk_router {
+.modal-open .app {
   -webkit-filter: ~"blur(3px) grayscale(25%)";
 }
 
@@ -2653,11 +2812,15 @@ ul.radio-inputs {
   }
 
   .modal-body {
-    padding: 0 0 15px;
+    padding: 0;
     font-size: 15px;
 
     p:last-child {
       margin-bottom: 0;
+    }
+
+    .alert {
+      border-radius: @border-radius-base;
     }
   }
 
@@ -2988,7 +3151,6 @@ ul.radio-inputs {
   color: @tooltip-color;
 }
 
-
 /**
 * Tag List
 * ============================================================================
@@ -3058,6 +3220,7 @@ ul.tag-list {
   li {
     display: inline-block;
     margin-bottom: 2px;
+
     button {
       width: 150px;
       text-align: center;
@@ -3071,6 +3234,7 @@ ul.tag-list {
       border-radius: 4px;
       padding: 10px;
       display: block;
+      margin-right: 5px;
 
       &:hover {
         border-color: #ccc;
@@ -3128,6 +3292,7 @@ ul.tag-list {
     border-radius: 5px;
     color: #fff;
     text-shadow: 0 2px 0 rgba(0,0,0, .06);
+    background: @gray; // Default BG
   }
 
   // Colors
@@ -3150,6 +3315,14 @@ ul.tag-list {
       color: #fff;
     }
 
+    &.javascript-angular2 .platformicon {
+      background: @blue;
+      color: #fff;
+      &:before {
+        content: "\e900";
+      }
+    }
+
     &.java .platformicon {
       background: @orange;
     }
@@ -3166,7 +3339,8 @@ ul.tag-list {
       background: #90C541;
     }
 
-    &.objc .platformicon {
+    &.objc .platformicon,
+    &.cocoa .platformicon, {
       background: @gray;
       line-height: 54px;
       font-size: 38px;
@@ -3197,6 +3371,10 @@ ul.tag-list {
       background: #ed573e;
       color: #fff;
     }
+
+    &.elixir .platformicon {
+      background: @purple-dark;
+    }
   }
 }
 
@@ -3211,6 +3389,25 @@ ul.tag-list {
     padding-left: 7px;
     font-size: 80%;
     vertical-align: top;
+  }
+}
+
+/**
+* QR Code
+* ============================================================================
+*/
+div.qrcode {
+  table {
+    border-spacing: 0;
+    margin: 40px auto;
+    td {
+      width: 5px;
+      height: 5px;
+
+      &.black {
+        background: black;
+      }
+    }
   }
 }
 
@@ -3241,12 +3438,42 @@ ul.tag-list {
 }
 
 /**
+ * Truncate component.
+ */
+.truncated {
+  position: relative;
+  .full-value {
+    display: none;
+    position: absolute;
+    background: @white;
+    left: -5px;
+    top: -5px;
+    padding: 4px;
+    border: 1px solid @trim;
+    white-space: nowrap;
+    border-radius: 4px;
+  }
+  &.expanded .full-value {
+    z-index: 10;
+    display: block;
+  }
+}
+
+/**
 * Responsive small screens
 * ============================================================================
 */
 
 @media(max-width:767px) {
 
+}
+
+@media(max-width:629px) {
+  .table-user-info {
+    .avatar {
+      top: 24px;
+    }
+  }
 }
 
 /**
@@ -3257,7 +3484,7 @@ ul.tag-list {
 @media (min-width: 768px) {
   .modal-dialog {
     position: absolute;
-    top: 50%;
+    top: 25%;
     left: 50%;
     margin-left: -300px;
     margin-top: -91px;

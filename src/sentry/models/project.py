@@ -8,23 +8,24 @@ sentry.models.project
 from __future__ import absolute_import, print_function
 
 import logging
+import six
 import warnings
 
 from django.conf import settings
-from django.core.urlresolvers import reverse
 from django.db import models
 from django.db.models import F
 from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
 
+from sentry.app import locks
 from sentry.db.models import (
     BaseManager, BoundedPositiveIntegerField, FlexibleForeignKey, Model,
     sane_repr
 )
 from sentry.db.models.utils import slugify_instance
-from sentry.utils.cache import Lock
-from sentry.utils.http import absolute_uri
 from sentry.utils.colors import get_hashed_color
+from sentry.utils.http import absolute_uri
+from sentry.utils.retries import TimedRetryPolicy
 
 
 # TODO(dcramer): pull in enum library
@@ -73,6 +74,8 @@ class Project(Model):
     Projects are permission based namespaces which generally
     are the top level entry point for all data.
     """
+    __core__ = True
+
     slug = models.SlugField(null=True)
     name = models.CharField(max_length=200)
     forced_color = models.CharField(max_length=6, null=True, blank=True)
@@ -99,7 +102,7 @@ class Project(Model):
         db_table = 'sentry_project'
         unique_together = (('team', 'slug'), ('organization', 'slug'))
 
-    __repr__ = sane_repr('team_id', 'slug')
+    __repr__ = sane_repr('team_id', 'name', 'slug')
 
     def __unicode__(self):
         return u'%s (%s)' % (self.name, self.slug)
@@ -110,16 +113,15 @@ class Project(Model):
 
     def save(self, *args, **kwargs):
         if not self.slug:
-            lock_key = 'slug:project'
-            with Lock(lock_key):
+            lock = locks.get('slug:project', duration=5)
+            with TimedRetryPolicy(10)(lock.acquire):
                 slugify_instance(self, self.name, organization=self.organization)
             super(Project, self).save(*args, **kwargs)
         else:
             super(Project, self).save(*args, **kwargs)
 
     def get_absolute_url(self):
-        return absolute_uri(reverse('sentry-stream', args=[
-            self.organization.slug, self.slug]))
+        return absolute_uri('/{}/{}/'.format(self.organization.slug, self.slug))
 
     def merge_to(self, project):
         from sentry.models import (
@@ -163,7 +165,7 @@ class Project(Model):
 
     def is_internal_project(self):
         for value in (settings.SENTRY_FRONTEND_PROJECT, settings.SENTRY_PROJECT):
-            if str(self.id) == str(value) or str(self.slug) == str(value):
+            if six.text_type(self.id) == six.text_type(value) or six.text_type(self.slug) == six.text_type(value):
                 return True
         return False
 
@@ -255,3 +257,25 @@ class Project(Model):
         if self.team.name not in self.name:
             return '%s %s' % (self.team.name, self.name)
         return self.name
+
+    def is_user_subscribed_to_mail_alerts(self, user):
+        from sentry.models import UserOption
+        is_enabled = UserOption.objects.get_value(
+            user, self, 'mail:alert', None)
+        if is_enabled is None:
+            is_enabled = UserOption.objects.get_value(
+                user, None, 'subscribe_by_default', '1') == '1'
+        else:
+            is_enabled = bool(is_enabled)
+        return is_enabled
+
+    def is_user_subscribed_to_workflow(self, user):
+        from sentry.models import UserOption, UserOptionValue
+
+        opt_value = UserOption.objects.get_value(
+            user, self, 'workflow:notifications', None)
+        if opt_value is None:
+            opt_value = UserOption.objects.get_value(
+                user, None, 'workflow:notifications',
+                UserOptionValue.all_conversations)
+        return opt_value == UserOptionValue.all_conversations

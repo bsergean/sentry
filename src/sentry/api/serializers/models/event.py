@@ -1,5 +1,7 @@
 from __future__ import absolute_import
 
+import six
+
 from datetime import datetime
 from django.utils import timezone
 
@@ -9,12 +11,15 @@ from sentry.models import Event, EventError
 
 @register(Event)
 class EventSerializer(Serializer):
-    _reserved_keys = frozenset(['sentry.interfaces.User', 'sdk', 'device'])
+    _reserved_keys = frozenset([
+        'sentry.interfaces.User', 'sdk', 'device',
+        'contexts'
+    ])
 
     def _get_entries(self, event, user, is_public=False):
         # XXX(dcramer): These are called entries for future-proofing
         interface_list = []
-        for key, interface in event.interfaces.iteritems():
+        for key, interface in six.iteritems(event.interfaces):
             # we treat user as a special contextual item
             if key in self._reserved_keys:
                 continue
@@ -39,27 +44,29 @@ class EventSerializer(Serializer):
         results = {}
         for item in item_list:
             user_interface = item.interfaces.get('sentry.interfaces.User')
+            # TODO(dcramer): convert to get_api_context
             if user_interface:
                 user_data = user_interface.to_json()
             else:
                 user_data = None
-            device_interface = item.interfaces.get('device')
-            if device_interface:
-                device_data = device_interface.to_json()
+
+            contexts_interface = item.interfaces.get('contexts')
+            if contexts_interface:
+                contexts_data = contexts_interface.get_api_context()
             else:
-                device_data = None
+                contexts_data = {}
 
             sdk_interface = item.interfaces.get('sdk')
             if sdk_interface:
-                sdk_data = sdk_interface.to_json()
+                sdk_data = sdk_interface.get_api_context()
             else:
                 sdk_data = None
 
             results[item] = {
                 'entries': self._get_entries(item, user, is_public=is_public),
                 'user': user_data,
+                'contexts': contexts_data,
                 'sdk': sdk_data,
-                'device': device_data,
             }
         return results
 
@@ -74,7 +81,10 @@ class EventSerializer(Serializer):
             error_result = {
                 'type': error['type'],
                 'message': message,
-                'data': error.to_dict(),
+                'data': {
+                    k: v for k, v in six.iteritems(error)
+                    if k != 'type'
+                },
             }
             errors.append(error_result)
 
@@ -98,17 +108,21 @@ class EventSerializer(Serializer):
 
         # TODO(dcramer): move release serialization here
         d = {
-            'id': str(obj.id),
-            'groupID': obj.group.id,
-            'eventID': str(obj.event_id),
+            'id': six.text_type(obj.id),
+            'groupID': six.text_type(obj.group.id),
+            'eventID': six.text_type(obj.event_id),
             'size': obj.size,
             'entries': attrs['entries'],
-            'message': obj.message,
+            # See GH-3248
+            'message': obj.get_legacy_message(),
             'user': attrs['user'],
+            'contexts': attrs['contexts'],
             'sdk': attrs['sdk'],
-            'device': attrs['device'],
+            # TODO(dcramer): move into contexts['extra']
             'context': obj.data.get('extra', {}),
             'packages': obj.data.get('modules', {}),
+            'type': obj.get_event_type(),
+            'metadata': obj.get_event_metadata(),
             'tags': tags,
             'platform': obj.platform,
             'dateCreated': obj.datetime,
@@ -127,6 +141,11 @@ class SharedEventSerializer(EventSerializer):
     def serialize(self, obj, attrs, user):
         result = super(SharedEventSerializer, self).serialize(obj, attrs, user)
         del result['context']
+        del result['contexts']
         del result['user']
         del result['tags']
+        result['entries'] = [
+            e for e in result['entries']
+            if e['type'] != 'breadcrumbs'
+        ]
         return result

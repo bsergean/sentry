@@ -7,6 +7,9 @@ sentry.tsdb.base
 """
 from __future__ import absolute_import
 
+import six
+from datetime import timedelta
+
 from django.conf import settings
 from django.utils import timezone
 from enum import Enum
@@ -28,6 +31,7 @@ class TSDBModel(Enum):
     group = 4
     group_tag_key = 5
     group_tag_value = 6
+    release = 7
 
     # the number of events sent to the server
     project_total_received = 100
@@ -61,6 +65,12 @@ class TSDBModel(Enum):
     frequent_projects_by_organization = 403
     # number of issues seen for a project, by project
     frequent_issues_by_project = 404
+    # number of events seen for a release, by issue
+    # frequent_releases_by_group = 406  # DEPRECATED
+    # number of events seen for a release, by issue
+    frequent_releases_by_group = 407
+    # number of events seen for an environment, by issue
+    frequent_environments_by_group = 408
 
 
 class BaseTSDB(object):
@@ -113,27 +123,42 @@ class BaseTSDB(object):
         """
         num_seconds = int(to_timestamp(end_timestamp)) - int(to_timestamp(start_timestamp))
 
-        # calculate the highest rollup within time range
+        # This loop attempts to find the smallest possible rollup that will
+        # contain both the start and end timestamps. ``self.rollups`` is
+        # ordered from the highest resolution (smallest interval) to lowest
+        # resolution (largest interval.)
+        # XXX: There is a bug here, since this function assumes that the end
+        # timestamp is always equal to or greater than the current time. If the
+        # time range is shifted far enough into the past (e.g. a 30 second
+        # window, retrieved several days after it's occurrence), this can
+        # return a rollup that has already been evicted due to TTL, even if a
+        # lower resolution representation of the range exists.
         for rollup, samples in self.rollups:
             if rollup * samples >= num_seconds:
                 return rollup
+
+        # If nothing actually matches the requested range, just return the
+        # lowest resolution interval.
         return self.rollups[-1][0]
 
     def get_optimal_rollup_series(self, start, end=None, rollup=None):
         if end is None:
             end = timezone.now()
 
-        # NOTE: "optimal" here means "able to most closely reflect the upper
-        # and lower bounds", not "able to construct the most efficient query"
         if rollup is None:
             rollup = self.get_optimal_rollup(start, end)
 
-        series = [self.normalize_to_epoch(start, rollup)]
-        end_ts = int(to_timestamp(end))
-        while series[-1] + rollup < end_ts:
-            series.append(series[-1] + rollup)
+        # This attempts to create a range with a duration as close as possible
+        # to the requested interval using the requested (or inferred) rollup
+        # resolution. This result always includes the ``end`` timestamp, but
+        # may not include the ``start`` timestamp.
+        series = []
+        timestamp = end
+        while timestamp >= start:
+            series.append(self.normalize_to_epoch(timestamp, rollup))
+            timestamp = timestamp - timedelta(seconds=rollup)
 
-        return rollup, series
+        return rollup, sorted(series)
 
     def calculate_expiry(self, rollup, samples, timestamp):
         """
@@ -167,8 +192,6 @@ class BaseTSDB(object):
         """
         To get a range of data for group ID=[1, 2, 3]:
 
-        Both ``start`` and ``end`` are inclusive.
-
         Returns a mapping of key => [(timestamp, count), ...].
 
         >>> now = timezone.now()
@@ -182,7 +205,7 @@ class BaseTSDB(object):
         range_set = self.get_range(model, keys, start, end, rollup)
         sum_set = dict(
             (key, sum(p for _, p in points))
-            for (key, points) in range_set.iteritems()
+            for (key, points) in six.iteritems(range_set)
         )
         return sum_set
 
@@ -193,7 +216,7 @@ class BaseTSDB(object):
         """
         normalize_ts_to_epoch = self.normalize_ts_to_epoch
         result = {}
-        for key, points in values.iteritems():
+        for key, points in six.iteritems(values):
             result[key] = []
             last_new_ts = None
             for (ts, count) in points:
@@ -230,6 +253,13 @@ class BaseTSDB(object):
         """
         raise NotImplementedError
 
+    def get_distinct_counts_union(self, model, keys, start, end=None, rollup=None):
+        """
+        Count the total number of distinct items across multiple counters
+        during a time range.
+        """
+        raise NotImplementedError
+
     def record_frequency_multi(self, requests, timestamp=None):
         """
         Record items in a frequency table.
@@ -248,6 +278,20 @@ class BaseTSDB(object):
         highest (most frequent) to lowest (least frequent) score. The maximum
         number of items returned is ``index capacity * rollup intervals`` if no
         ``limit`` is provided.
+        """
+        raise NotImplementedError
+
+    def get_most_frequent_series(self, model, keys, start, end=None, rollup=None, limit=None):
+        """
+        Retrieve the most frequently seen items in a frequency table for each
+        interval in a series. (This is in contrast with ``get_most_frequent``,
+        which returns the most frequent items seen over the entire requested
+        range.)
+
+        Results are returned as a mapping, where the key is the key requested
+        and the value is a list of ``(timestamp, {item: score, ...})`` pairs
+        over the series. The maximum number of items returned for each interval
+        is the index capacity if no ``limit`` is provided.
         """
         raise NotImplementedError
 

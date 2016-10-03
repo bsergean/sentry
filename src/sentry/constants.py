@@ -12,11 +12,12 @@ from __future__ import absolute_import, print_function
 
 import logging
 import os.path
-from operator import attrgetter
-from collections import OrderedDict
+import six
 
+from collections import OrderedDict
 from django.conf import settings
 from django.utils.translation import ugettext_lazy as _
+from operator import attrgetter
 
 
 def get_all_languages():
@@ -69,16 +70,20 @@ MINUTE_NORMALIZATION = 15
 MAX_TAG_KEY_LENGTH = 32
 MAX_TAG_VALUE_LENGTH = 200
 MAX_CULPRIT_LENGTH = 200
+MAX_EMAIL_FIELD_LENGTH = 75
 
 # Team slugs which may not be used. Generally these are top level URL patterns
 # which we don't want to worry about conflicts on.
-RESERVED_ORGANIZATION_SLUGS = (
+RESERVED_ORGANIZATION_SLUGS = frozenset((
     'admin', 'manage', 'login', 'account', 'register', 'api',
     'accept', 'organizations', 'teams', 'projects', 'help',
-    'docs', 'logout', '404', '500', '_static',
-)
-
-RESERVED_TEAM_SLUGS = RESERVED_ORGANIZATION_SLUGS
+    'docs', 'logout', '404', '500', '_static', 'out', 'debug',
+    'remote', 'get-cli', 'blog', 'welcome', 'features',
+    'customers', 'integrations', 'signup', 'pricing',
+    'subscribe', 'enterprise', 'about', 'jobs', 'thanks', 'guide',
+    'privacy', 'security', 'terms', 'from', 'sponsorship', 'for',
+    'at', 'platforms', 'branding', 'vs', 'answers', '_admin',
+))
 
 LOG_LEVELS = {
     logging.DEBUG: 'debug',
@@ -89,6 +94,8 @@ LOG_LEVELS = {
 }
 DEFAULT_LOG_LEVEL = 'error'
 DEFAULT_LOGGER_NAME = ''
+LOG_LEVELS_MAP = {v: k for k, v in six.iteritems(LOG_LEVELS)}
+
 
 # Default alerting threshold values
 DEFAULT_ALERT_PROJECT_THRESHOLD = (500, 25)  # 500%, 25 events
@@ -125,6 +132,7 @@ SENTRY_RULES = (
     'sentry.rules.conditions.regression_event.RegressionEventCondition',
     'sentry.rules.conditions.tagged_event.TaggedEventCondition',
     'sentry.rules.conditions.event_frequency.EventFrequencyCondition',
+    'sentry.rules.conditions.event_frequency.EventUniqueUserFrequencyCondition',
     'sentry.rules.conditions.event_attribute.EventAttributeCondition',
     'sentry.rules.conditions.level.LevelCondition',
 )
@@ -181,6 +189,9 @@ VALID_PLATFORMS = set([
     'php',
     'python',
     'ruby',
+    'elixir',
+    'haskell',
+    'groovy',
 ])
 
 OK_PLUGIN_ENABLED = _("The {name} integration has been enabled.")
@@ -189,7 +200,17 @@ OK_PLUGIN_DISABLED = _("The {name} integration has been disabled.")
 
 OK_PLUGIN_SAVED = _('Configuration for the {name} integration has been saved.')
 
+WARN_SESSION_EXPIRED = 'Your session has expired.'  # TODO: translate this
+
 # Key to use when ordering a list of events manually
 EVENT_ORDERING_KEY = attrgetter('datetime', 'id')
 
 FILTER_MASK = '[Filtered]'
+
+# Maximum length of a symbol
+MAX_SYM = 256
+
+# Known dsym mimetypes
+KNOWN_DSYM_TYPES = {
+    'application/x-mach-binary': 'macho'
+}

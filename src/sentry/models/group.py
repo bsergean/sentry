@@ -10,17 +10,18 @@ from __future__ import absolute_import, print_function
 import logging
 import math
 import re
+import six
 import time
 import warnings
+
 from base64 import b16decode, b16encode
 from datetime import timedelta
-
-import six
 from django.core.urlresolvers import reverse
 from django.db import models
 from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
 
+from sentry import eventtypes
 from sentry.app import buffer
 from sentry.constants import (
     DEFAULT_LOGGER_NAME, EVENT_ORDERING_KEY, LOG_LEVELS, MAX_CULPRIT_LENGTH
@@ -58,23 +59,21 @@ def get_group_with_redirect(id, queryset=None):
     Retrieve a group by ID, checking the redirect table if the requested group
     does not exist. Returns a two-tuple of ``(object, redirected)``.
     """
-    from sentry.models import GroupRedirect
-
     if queryset is None:
         queryset = Group.objects.all()
+        # When not passing a queryset, we want to read from cache
+        getter = Group.objects.get_from_cache
+    else:
+        getter = queryset.get
 
     try:
-        return queryset.get(id=id), False
+        return getter(id=id), False
     except Group.DoesNotExist as error:
+        from sentry.models import GroupRedirect
+        qs = GroupRedirect.objects.filter(previous_group_id=id).values_list('group_id', flat=True)
         try:
-            redirect = GroupRedirect.objects.get(previous_group_id=id)
-        except GroupRedirect.DoesNotExist:
-            raise error  # raise original `DoesNotExist`
-
-        try:
-            return queryset.get(id=redirect.group_id), True
+            return queryset.get(id=qs), True
         except Group.DoesNotExist:
-            logger.warning('%r redirected to group that does not exist!', redirect, exc_info=True)
             raise error  # raise original `DoesNotExist`
 
 
@@ -136,10 +135,10 @@ class GroupManager(BaseManager):
                 'times_seen': 1,
             }, {
                 'group_id': group.id,
-                'project_id': project_id,
                 'key': key,
                 'value': value,
             }, {
+                'project': project_id,
                 'last_seen': date,
             })
 
@@ -268,13 +267,19 @@ class Group(Model):
         return self.status
 
     def get_share_id(self):
-        return b16encode('{}.{}'.format(self.project_id, self.id)).lower()
+        return b16encode(
+            ('{}.{}'.format(self.project_id, self.id)).encode('utf-8')
+        ).lower().decode('utf-8')
 
     @classmethod
     def from_share_id(cls, share_id):
+        if not share_id:
+            raise cls.DoesNotExist
         try:
-            project_id, group_id = b16decode(share_id.upper()).split('.')
-        except ValueError:
+            project_id, group_id = b16decode(share_id.upper()).decode('utf-8').split('.')
+        except (ValueError, TypeError):
+            raise cls.DoesNotExist
+        if not (project_id.isdigit() and group_id.isdigit()):
             raise cls.DoesNotExist
         return cls.objects.get(project=project_id, id=group_id)
 
@@ -369,29 +374,50 @@ class Group(Model):
 
         return self._tag_cache
 
-    def error(self):
-        return self.message
-    error.short_description = _('error')
+    def get_event_type(self):
+        """
+        Return the type of this issue.
 
-    def has_two_part_message(self):
-        message = strip(self.message)
-        return '\n' in message or len(message) > 100
+        See ``sentry.eventtypes``.
+        """
+        return self.data.get('type', 'default')
+
+    def get_event_metadata(self):
+        """
+        Return the metadata of this issue.
+
+        See ``sentry.eventtypes``.
+        """
+        etype = self.data.get('type')
+        if etype is None:
+            etype = 'default'
+        if 'metadata' not in self.data:
+            data = self.data.copy() if self.data else {}
+            data['message'] = self.message
+            return eventtypes.get(etype)(data).get_metadata()
+        return self.data['metadata']
 
     @property
     def title(self):
-        culprit = strip(self.culprit)
-        if culprit:
-            return culprit
-        return self.message
+        et = eventtypes.get(self.get_event_type())(self.data)
+        return et.to_string(self.get_event_metadata())
+
+    def error(self):
+        warnings.warn('Group.error is deprecated, use Group.title',
+                      DeprecationWarning)
+        return self.title
+    error.short_description = _('error')
 
     @property
     def message_short(self):
-        message = strip(self.message)
-        if not message:
-            message = '<unlabeled message>'
-        else:
-            message = truncatechars(message.splitlines()[0], 100)
-        return message
+        warnings.warn('Group.message_short is deprecated, use Group.title',
+                      DeprecationWarning)
+        return self.title
+
+    def has_two_part_message(self):
+        warnings.warn('Group.has_two_part_message is no longer used',
+                      DeprecationWarning)
+        return False
 
     @property
     def organization(self):
@@ -410,5 +436,5 @@ class Group(Model):
         return '[%s] %s: %s' % (
             self.project.get_full_name().encode('utf-8'),
             six.text_type(self.get_level_display()).upper().encode('utf-8'),
-            self.message_short.encode('utf-8')
+            self.title.encode('utf-8')
         )

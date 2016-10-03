@@ -1,7 +1,10 @@
 from __future__ import absolute_import
 
+import six
+
 from django.db.models import Q
 from operator import or_
+from six.moves import reduce
 
 from sentry.api.base import DocSection
 from sentry.api.bases import GroupEndpoint
@@ -34,7 +37,7 @@ class GroupEventsEndpoint(GroupEndpoint):
         tagvalues = {
             (t[1], t[2]): t[0]
             for t in TagValue.objects.filter(
-                reduce(or_, (Q(key=k, value=v) for k, v in tags.iteritems())),
+                reduce(or_, (Q(key=k, value=v) for k, v in six.iteritems(tags))),
                 project=project,
             ).values_list('id', 'key', 'value')
         }
@@ -42,7 +45,7 @@ class GroupEventsEndpoint(GroupEndpoint):
         try:
             tag_lookups = [
                 (tagkeys[k], tagvalues[(k, v)])
-                for k, v in tags.iteritems()
+                for k, v in six.iteritems(tags)
             ]
         except KeyError:
             # one or more tags were invalid, thus the result should be an empty
@@ -69,6 +72,8 @@ class GroupEventsEndpoint(GroupEndpoint):
                 event_id__in=matches,
                 group_id=group.id,
             ).values_list('event_id', flat=True)[:1000])
+            if not matches:
+                return []
         return matches
 
     @attach_scenarios([list_available_samples_scenario])
@@ -97,9 +102,13 @@ class GroupEventsEndpoint(GroupEndpoint):
                 )
 
             if query_kwargs['tags']:
-                events = events.filter(
-                    id__in=self._tags_to_filter(group, query_kwargs['tags']),
-                )
+                matches = self._tags_to_filter(group, query_kwargs['tags'])
+                if matches:
+                    events = events.filter(
+                        id__in=matches,
+                    )
+                else:
+                    events = events.none()
 
         return self.paginate(
             request=request,

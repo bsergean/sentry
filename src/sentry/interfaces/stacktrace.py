@@ -11,18 +11,18 @@ from __future__ import absolute_import
 __all__ = ('Stacktrace',)
 
 import re
-from types import NoneType
-from six import string_types
+import six
 
 from django.conf import settings
 from django.utils.translation import ugettext as _
-from urlparse import urlparse
+from six.moves.urllib.parse import urlparse
 
 from sentry.app import env
 from sentry.interfaces.base import Interface, InterfaceValidationError
 from sentry.models import UserOption
 from sentry.utils.safe import trim, trim_dict
 from sentry.web.helpers import render_to_string
+from sentry.constants import VALID_PLATFORMS
 
 
 _ruby_anon_func = re.compile(r'_\d{2,}')
@@ -40,7 +40,32 @@ _java_enhancer_re = re.compile(r'''
 ''', re.X)
 
 
-def get_context(lineno, context_line, pre_context=None, post_context=None, filename=None):
+def trim_package(pkg):
+    if not pkg:
+        return '?'
+    pkg = pkg.split('/')[-1]
+    if pkg.endswith(('.dylib', '.so', '.a')):
+        pkg = pkg.rsplit('.', 1)[0]
+    return pkg
+
+
+def to_hex_addr(addr):
+    if addr is None:
+        return None
+    elif isinstance(addr, six.integer_types):
+        return '0x%x' % addr
+    elif isinstance(addr, six.string_types):
+        if addr[:2] == '0x':
+            # XXX: More correct would be this but we currently can't do
+            # that yet.
+            # addr = int(addr[2:], 16)
+            return addr
+        return '0x%x' % int(addr)
+    raise ValueError('Unsupported address format %r' % (addr,))
+
+
+def get_context(lineno, context_line, pre_context=None, post_context=None,
+                filename=None):
     if lineno is None:
         return []
 
@@ -204,9 +229,12 @@ class Frame(Interface):
         filename = data.get('filename')
         function = data.get('function')
         module = data.get('module')
+        package = data.get('package')
 
-        for name in ('abs_path', 'filename', 'function', 'module'):
-            if not isinstance(data.get(name), (string_types, NoneType)):
+        for name in ('abs_path', 'filename', 'function', 'module',
+                     'package'):
+            v = data.get(name)
+            if v is not None and not isinstance(v, six.string_types):
                 raise InterfaceValidationError("Invalid value for '%s'" % name)
 
         # absolute path takes priority over filename
@@ -225,11 +253,15 @@ class Frame(Interface):
             else:
                 filename = abs_path
 
-        if not (filename or function or module):
-            raise InterfaceValidationError("No 'filename' or 'function' or 'module'")
+        if not (filename or function or module or package):
+            raise InterfaceValidationError("No 'filename' or 'function' or 'module' or 'package'")
 
         if function == '?':
             function = None
+
+        platform = data.get('platform')
+        if platform not in VALID_PLATFORMS:
+            platform = None
 
         context_locals = data.get('vars') or {}
         if isinstance(context_locals, (list, tuple)):
@@ -264,17 +296,19 @@ class Frame(Interface):
 
         instruction_offset = data.get('instruction_offset')
         if instruction_offset is not None and \
-           not isinstance(instruction_offset, (int, long)):
+           not isinstance(instruction_offset, six.integer_types):
             raise InterfaceValidationError("Invalid value for 'instruction_offset'")
 
         kwargs = {
             'abs_path': trim(abs_path, 256),
             'filename': trim(filename, 256),
+            'platform': platform,
             'module': trim(module, 256),
             'function': trim(function, 256),
-            'package': trim(data.get('package'), 256),
-            'symbol_addr': trim(data.get('symbol_addr'), 16),
-            'instruction_addr': trim(data.get('instruction_addr'), 16),
+            'package': package,
+            'image_addr': to_hex_addr(trim(data.get('image_addr'), 16)),
+            'symbol_addr': to_hex_addr(trim(data.get('symbol_addr'), 16)),
+            'instruction_addr': to_hex_addr(trim(data.get('instruction_addr'), 16)),
             'instruction_offset': instruction_offset,
             'in_app': in_app,
             'context_line': context_line,
@@ -357,6 +391,7 @@ class Frame(Interface):
             'absPath': self.abs_path,
             'module': self.module,
             'package': self.package,
+            'platform': self.platform,
             'instructionAddr': self.instruction_addr,
             'instructionOffset': self.instruction_offset,
             'symbolAddr': self.symbol_addr,
@@ -437,6 +472,16 @@ class Frame(Interface):
         }).strip('\n')
 
     def get_culprit_string(self, platform=None):
+        # If this frame has a platform, we use it instead of the one that
+        # was passed in (as that one comes from the exception which might
+        # not necessarily be the same platform).
+        if self.platform is not None:
+            platform = self.platform
+        if platform in ('objc', 'cocoa'):
+            return '%s (%s)' % (
+                self.function or '?',
+                trim_package(self.package),
+            )
         fileloc = self.module or self.filename
         if not fileloc:
             return ''
@@ -547,7 +592,7 @@ class Stacktrace(Interface):
     .. note:: This interface can be passed as the 'stacktrace' key in addition
               to the full interface path.
     """
-    score = 1000
+    score = 2000
 
     def __iter__(self):
         return iter(self.frames)
@@ -643,21 +688,27 @@ class Stacktrace(Interface):
     def get_hash(self, system_frames=True):
         frames = self.frames
 
-        # TODO(dcramer): this should apply only to JS
-        # In a common case (I believe from window.onerror) we can end up with
-        # a stacktrace which includes a single frame and a reference that isnt
-        # valuable. It would generally point to the loading page, so it's possible
-        # we could improve this check using that information.
+        # TODO(dcramer): this should apply only to platform=javascript
+        # Browser JS will often throw errors (from inlined code in an HTML page)
+        # which contain only a single frame, no function name, and have the HTML
+        # document as the filename. In this case the hash is often not usable as
+        # the context cannot be trusted and the URL is dynamic (this also means
+        # the line number cannot be trusted).
         stack_invalid = (
-            len(frames) == 1 and frames[0].lineno == 1
-            and not frames[0].function and frames[0].is_url()
+            len(frames) == 1 and not frames[0].function and frames[0].is_url()
         )
 
         if stack_invalid:
             return []
 
         if not system_frames:
+            total_frames = len(frames)
             frames = [f for f in frames if f.in_app] or frames
+
+            # if app frames make up less than 10% of the stacktrace discard
+            # the hash as invalid
+            if len(frames) / float(total_frames) < 0.10:
+                return []
 
         output = []
         for frame in frames:

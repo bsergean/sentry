@@ -25,17 +25,25 @@ const AvatarCropper = React.createClass({
     };
   },
 
+  componentWillUnmount() {
+    this.revokeObjectUrl();
+  },
+
   MIN_DIMENSION: 256,
 
   MAX_DIMENSION: 1024,
 
   onChange(ev) {
+    /*eslint consistent-return:0*/
     let file = ev.target.files[0];
+
+    if (!file)
+      return; // No file selected (e.g. user clicked "cancel")
 
     if (!/^image\//.test(file.type))
       return void this.handleError('That is not a supported file type.');
 
-    this.state.objectURL && window.URL.revokeObjectURL(this.state.objectURL);
+    this.revokeObjectUrl();
     this.setState({
       file: file,
       objectURL: window.URL.createObjectURL(file)
@@ -44,7 +52,7 @@ const AvatarCropper = React.createClass({
     });
   },
 
-  componentWIllUnmount() {
+  revokeObjectUrl() {
     this.state.objectURL && window.URL.revokeObjectURL(this.state.objectURL);
   },
 
@@ -342,13 +350,13 @@ const AvatarCropper = React.createClass({
       <div>
         {!src &&
         <div className="image-well well blankslate">
-          <p><a onClick={this.uploadClick}><strong>{t('Upload a photo')}</strong></a>{t(' to get started.')}</p>
+          <p><a onClick={this.uploadClick}><strong>Upload a photo</strong></a> to get started.</p>
         </div>}
         {this.renderImageCrop()}
         {this.renderCanvas()}
         <div className="form-group">
           {src && <a onClick={this.uploadClick}>{t('Change Photo')}</a>}
-          <input ref="file" type="file" accept="image/*" onChange={this.onChange} style={style}/>
+          <input ref="file" type="file" accept="image/gif,image/jpeg,image/png" onChange={this.onChange} style={style}/>
         </div>
       </div>
     );

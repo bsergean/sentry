@@ -24,11 +24,18 @@
   <link rel="apple-touch-icon" sizes="120x120" href="{% absolute_asset_url "sentry" "images/icons/apple-touch-icon-120x120.png" %}">
   <link rel="apple-touch-icon" sizes="152x152" href="{% absolute_asset_url "sentry" "images/icons/apple-touch-icon-152x152.png" %}">
 
+  <link rel="mask-icon" sizes="any" href="{% absolute_asset_url "sentry" "images/icons/sentry-glyph-black.svg" %}" color="#FB4226">
+
   {% block css %}
   <link href="{% asset_url "sentry" "dist/sentry.css" %}" rel="stylesheet"/>
   {% endblock %}
 
   <title>{% block title %}Sentry{% endblock %}</title>
+
+  <script>
+  window.csrfCookieName = '{{ CSRF_COOKIE_NAME }}';
+  </script>
+
 
   {% block scripts %}
   <script src="{% asset_url "sentry" "dist/vendor.js" %}"{% crossorigin %}></script>
@@ -88,7 +95,8 @@
             </a>
             <ul class="dropdown-menu dropdown-menu-right">
               <li><a href="{% url 'sentry-account-settings' %}">{% trans "Account" %}</a></li>
-              {% if request.user.is_superuser %}
+              <li><a href="{% url 'sentry-api' %}">{% trans "API" %}</a></li>
+              {% if request.is_superuser %}
                 <li><a href="{% url 'sentry-admin-overview' %}">{% trans "Admin" %}</a></li>
               {% endif %}
               <li><a href="{% url 'sentry-logout' %}">{% trans "Sign out" %}</a></li>
@@ -104,7 +112,7 @@
 
         <ul class="global-nav pull-right">
           {% block global_nav %}
-          <li><a href="https://docs.getsentry.com">{% trans "Docs" %}</a></li>
+          <li><a href="https://docs.sentry.io">{% trans "Docs" %}</a></li>
           {% endblock %}
         </ul>
 
@@ -133,7 +141,7 @@
     </header>
     {% endblock %}
 
-    {% if organization and request.user.is_authenticated %}
+    {% if organization and ACCESS.org_read %}
     {% block sub-header %}
     <div class="sub-header">
       <div class="container">
@@ -146,7 +154,7 @@
         <div id="blk_projectselect"></div>
         <script>
         $(function(){
-          React.render(React.createFactory(Sentry.ProjectSelector)({
+          ReactDOM.render(React.createFactory(Sentry.ProjectSelector)({
             organization: {% serialize_detailed_org organization %},
             projectId: {% if project %}'{{ project.slug }}'{% else %}null{% endif %},
           }), document.getElementById('blk_projectselect'));
@@ -183,13 +191,11 @@
       <div class="container">
         {% block footer %}
         <div class="pull-right">
-          {% if request.is_superuser %}
-          <a href="{% url 'sentry-admin-status' %}">{% trans "Admin" %}</a>
-          {% endif %}
           {% block support_link %}{% endblock %}
-          <a href="https://docs.getsentry.com/hosted/api/">{% trans "API" %}</a>
-          <a href="https://docs.getsentry.com">{% trans "Docs" %}</a>
-          <a href="https://github.com/getsentry/sentry">{% trans "Contribute" %}</a>
+          <a href="https://docs.sentry.io/hosted/api/">{% trans "API" %}</a>
+          <a href="https://docs.sentry.io">{% trans "Docs" %}</a>
+          <a href="https://github.com/getsentry/sentry" rel="noreferrer">{% trans "Contribute" %}</a>
+          {% if ONPREMISE %}<a href="/out/">{% trans "Migrate to SaaS" %}</a>{% endif %}
         </div>
         <div class="version pull-left">Sentry {{ sentry_version.current }} {% if sentry_version.update_available %}<a href="#" title="You're running an old version of Sentry, did you know {{ sentry_version.latest }} is available?" class="tip icon-circle-arrow-up">&nbsp;</a>{% endif %}</div>
         <a href="/" class="icon-sentry-logo"></a>
@@ -313,8 +319,6 @@
   });
   </script>
   {% endblock %}
-
-  {% load_captcha %}
 
   {% block scripts_bottom %}{% endblock %}
 </body>

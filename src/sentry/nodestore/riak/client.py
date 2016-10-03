@@ -12,14 +12,14 @@ import six
 import sys
 import socket
 from random import shuffle
+from six.moves.queue import Queue
 from time import time
 from threading import Lock, Thread, Event
-from Queue import Queue
 
 # utilize the ca_certs path from requests since we already depend on it
 # and they bundle a ca cert.
 from requests.certs import where as ca_certs
-from urllib import urlencode, quote_plus
+from six.moves.urllib.parse import urlencode, quote_plus
 from urllib3 import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.connection import HTTPConnection
 from urllib3.exceptions import HTTPError
@@ -45,7 +45,7 @@ class RiakClient(object):
 
     def _start(self, size):
         assert size > 0
-        for _ in xrange(size):
+        for _ in range(size):
             t = Thread(target=self._target)
             t.setDaemon(True)
             t.start()
@@ -222,14 +222,14 @@ class ConnectionManager(object):
         last_error = None
 
         try:
-            for _ in xrange(self.max_retries + 1):
+            for _ in range(self.max_retries + 1):
                 # If we're trying to initiate a new connection, and
                 # all connections are already dead, then we should flail
                 # and attempt to connect to one of them
                 if len(self.connections) == 0:
                     self.force_revive()
 
-                conn = self.strategy.next(self.connections)
+                conn = self.strategy.next(self.connections)  # NOQA
                 try:
                     return conn.urlopen(method, path, **kwargs)
                 except HTTPError:
@@ -277,8 +277,18 @@ class ConnectionManager(object):
 
             # timeout has expired, so move from dead to alive pool
             with self._lock:
-                self.connections.append(conn)
-                self.dead_connections.remove((conn, timeout))
+                try:
+                    # Attempt to remove the connection from dead_connections
+                    # pool, but it's possible that it was already removed in
+                    # another thread.
+                    self.dead_connections.remove((conn, timeout))
+                except ValueError:
+                    # In which case, we don't care and we just carry on.
+                    pass
+                else:
+                    # Only add the connection back into the live pool
+                    # if we've successfully removed from dead pool.
+                    self.connections.append(conn)
 
     def close(self):
         """

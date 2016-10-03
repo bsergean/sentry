@@ -1,5 +1,105 @@
-Version 8.5 (Unreleased)
+Version 8.9 (Unreleased)
 ------------------------
+
+Version 8.8
+-----------
+
+- Added unique user frequency rule condition.
+- Fixed a major performance regression from 8.7 on the ``GroupTagValue`` model.
+- Various security fixes related to CSRF and XSS.
+- Server side filtering of event ingest.
+
+Schema Changes
+~~~~~~~~~~~~~~
+
+- Removed ``HelpPage`` model.
+- Added ``OrganizationMember.token`` column.
+- Removed ``OrganizationMember.counter`` column.
+
+Version 8.7
+-----------
+
+- Removed "Replay Request" feature.
+- Upgraded underlying redis library to resolve some networking issues.
+- Added support for minified React exceptions.
+
+Schema Changes
+~~~~~~~~~~~~~~
+
+- Remove index ``GroupTagValue(project_id)``.
+- Added ``Rule.status`` column.
+- Added ``GroupRelease`` model.
+- Added ``Environment`` model.
+- Added ``ReleaseEnvironment`` model.
+
+Version 8.6
+-----------
+
+- The ``message`` attribute on Event/Group is now purely used for search storage.
+- The ``sentry.interfaces.Message`` interface now contains a ``formatted`` attribute.
+- ``SENTRY_MANAGED_USER_FIELDS`` now defaults to an empty list.
+- Issues now render based on the type of data present, which are represented by
+  the type and metadata attributes in API responses.
+- Stacktrace rendering has been greatly simplified and unified across languages.
+- Client's may now pass the 'contexts' attribute, which will eventually supercede 'extra'.
+- Various named contexts are now automatically generated and summarized for Cocoa and JavaScript
+  issues.
+- Added JSON formatting for logs with ``system.logging-format``.
+- Added a ``loglevel`` command line flag to most commands.
+- Added two factor authentication support.
+- Added support for setting IP address of an event automatically on event submission for all platforms.
+- Added unsubscribe links to mails.
+- Added email verification.
+- Added ability to link/unlink Issues, support is dependent on plugins.
+- Can now toggle between minified/original code in stacktraces where sourcemaps were applied.
+- Can now upload release artifacts with tilde prefix (~) to omit protocol + host in URL lookups.
+
+Schema Changes
+~~~~~~~~~~~~~~
+
+- Added ``User.is_password_expired`` column.
+- Added ``User.last_password_change`` column.
+- Added ``UserEmail`` model.
+- Added unique index on ``GroupTagValue(group_id, key, value)``
+- Remove unique index on ``GroupTagValue(project_id, group_id, key, value)``
+- Added index on ``GroupTagValue(project_id, key, value)``
+- Added ``GroupSubscription`` model.
+
+Version 8.5.1
+-------------
+
+- Fixed issue with new Unsubscribe links in emails not working.
+- Fixed bug with raven-js compatibility with IE8.
+- Fixed bug handling IPv6 addresses.
+
+Version 8.5
+-----------
+
+- Added option to upload a profile image as an alternative to Gravatar.
+- Deprecated ``sentry celery`` subcommand in favor of ``sentry run {worker|cron}``.
+- Breadcrumb interface now rendered in event UI.
+- Project notification settings page now indicates if current user is subscribed to active project.
+- User is now automatically redirected to login page if their session expires inside React client application.
+- Added new auth tokens to deprecate the usage of the older API keys.
+
+Schema Changes
+~~~~~~~~~~~~~~
+
+- Added ``ProjectPlatform`` model.
+- Added index on``EventTag`` index.
+- Added unique index on ``UserReport`` model.
+- Added ``UserAvatar`` model.
+- Added ``EventTag.group_id`` column.
+- Added ``ApiToken`` model.
+- Added ``Authenticator`` model.
+
+
+Version 8.4.1
+-------------
+
+- Fixed issue in running 8.4 migrations on MySQL only.
+- Fixed issue that caused an infinite loop in ``patch_context.py`` under a race condition.
+- Silently ignore breadcrumb data coming from clients instead of showing an error in the UI.
 
 Version 8.4
 -----------
@@ -135,7 +235,7 @@ Version 8.1.1
 Version 8.1.0
 -------------
 
-- Default web server is now uWSGI (https://uwsgi-docs.readthedocs.org/en/latest/) to replace gunicorn.
+- Default web server is now uWSGI (https://uwsgi-docs.readthedocs.io/en/latest/) to replace gunicorn.
 - New "Saved Searches". See: http://blog.getsentry.com/2016/01/19/introducing-saved-searches.html
 
 Schema Changes

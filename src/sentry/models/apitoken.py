@@ -13,6 +13,8 @@ from sentry.db.models import (
 
 
 class ApiToken(Model):
+    __core__ = True
+
     # users can generate tokens without being key-bound
     key = FlexibleForeignKey('sentry.ApiKey', null=True)
     user = FlexibleForeignKey('sentry.User')
@@ -21,6 +23,7 @@ class ApiToken(Model):
         ('project:read', 'project:read'),
         ('project:write', 'project:write'),
         ('project:delete', 'project:delete'),
+        ('project:releases', 'project:releases'),
         ('team:read', 'team:read'),
         ('team:write', 'team:write'),
         ('team:delete', 'team:delete'),
@@ -64,7 +67,12 @@ class ApiToken(Model):
         }
 
     def get_scopes(self):
-        return [k for k, v in self.scopes.iteritems() if v]
+        return [k for k, v in six.iteritems(self.scopes) if v]
 
     def has_scope(self, scope):
         return scope in self.scopes
+
+    def get_allowed_origins(self):
+        if self.key:
+            return self.key.get_allowed_origins()
+        return ()

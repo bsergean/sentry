@@ -1,4 +1,7 @@
 import React from 'react';
+import $ from 'jquery';
+import Cookies from 'js-cookie';
+
 import ApiMixin from '../mixins/apiMixin';
 import Alerts from '../components/alerts';
 import AlertActions from '../actions/alertActions.jsx';
@@ -71,6 +74,18 @@ const App = React.createClass({
         message: msg.message,
         type: msg.level
       });
+    });
+
+    $(document).ajaxError(function (evt, jqXHR) {
+      // TODO: Need better way of identifying anonymous pages
+      //       that don't trigger redirect
+      let pageAllowsAnon = /^\/share\//.test(window.location.pathname);
+      if (jqXHR && jqXHR.status === 401 && !pageAllowsAnon) {
+        Cookies.set('session_expired', 1);
+        // User has become unauthenticated; reload URL, and let Django
+        // redirect to login page
+        window.location.reload();
+      }
     });
   },
 

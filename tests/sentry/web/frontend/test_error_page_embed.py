@@ -1,7 +1,7 @@
 from __future__ import absolute_import
 
 from django.core.urlresolvers import reverse
-from urllib import quote
+from six.moves.urllib.parse import quote
 from uuid import uuid4
 
 from sentry.models import UserReport
@@ -33,6 +33,13 @@ class ErrorPageEmbedTest(TestCase):
         assert resp.status_code == 200
         self.assertTemplateUsed(resp, 'sentry/error-page-embed.html')
 
+    def test_uses_locale_from_header(self):
+        resp = self.client.get(
+            self.path, HTTP_REFERER='http://example.com', HTTP_ACCEPT_LANGUAGE='fr')
+        assert resp.status_code == 200
+        self.assertTemplateUsed(resp, 'sentry/error-page-embed.html')
+        assert 'Fermer' in resp.content  # Close
+
     def test_submission(self):
         resp = self.client.post(self.path, {
             'name': 'Jane Doe',
@@ -63,3 +70,18 @@ class ErrorPageEmbedTest(TestCase):
         assert report.event_id == self.event_id
         assert report.project == self.project
         assert report.group is None
+
+    def test_submission_invalid_event_id(self):
+        self.event_id = 'x' * 100
+        self.path = '%s?eventId=%s&dsn=%s' % (
+            reverse('sentry-error-page-embed'),
+            quote(self.event_id),
+            quote(self.key.dsn_public),
+        )
+
+        resp = self.client.post(self.path, {
+            'name': 'Jane Doe',
+            'email': 'jane@example.com',
+            'comments': 'This is an example!',
+        }, HTTP_REFERER='http://example.com')
+        assert resp.status_code == 400

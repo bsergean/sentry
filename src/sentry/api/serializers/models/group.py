@@ -1,5 +1,7 @@
 from __future__ import absolute_import, print_function
 
+import six
+
 from collections import namedtuple
 from datetime import timedelta
 from django.core.urlresolvers import reverse
@@ -10,7 +12,8 @@ from sentry.app import tsdb
 from sentry.constants import LOG_LEVELS
 from sentry.models import (
     Group, GroupAssignee, GroupBookmark, GroupMeta, GroupResolution,
-    GroupResolutionStatus, GroupSeen, GroupSnooze, GroupStatus, GroupTagKey
+    GroupResolutionStatus, GroupSeen, GroupSnooze, GroupSubscription,
+    GroupStatus, GroupTagKey, UserOption, UserOptionValue
 )
 from sentry.utils.db import attach_foreignkey
 from sentry.utils.http import absolute_uri
@@ -19,6 +22,28 @@ from sentry.utils.safe import safe_execute
 
 @register(Group)
 class GroupSerializer(Serializer):
+    def _get_subscriptions(self, item_list, user):
+        default_subscribed = UserOption.objects.get_value(
+            user=user,
+            project=None,
+            key='workflow:notifications',
+        )
+        if default_subscribed == UserOptionValue.participating_only:
+            subscriptions = set(GroupSubscription.objects.filter(
+                group__in=item_list,
+                user=user,
+                is_active=True,
+            ).values_list('group_id', flat=True))
+        else:
+            subscriptions = set([i.id for i in item_list]).difference(
+                GroupSubscription.objects.filter(
+                    group__in=item_list,
+                    user=user,
+                    is_active=False,
+                ).values_list('group_id', flat=True),
+            )
+        return subscriptions
+
     def get_attrs(self, item_list, user):
         from sentry.plugins import plugins
 
@@ -35,9 +60,11 @@ class GroupSerializer(Serializer):
                 user=user,
                 group__in=item_list,
             ).values_list('group_id', 'last_seen'))
+            subscriptions = self._get_subscriptions(item_list, user)
         else:
             bookmarks = set()
             seen_groups = {}
+            subscriptions = set()
 
         assignees = dict(
             (a.group_id, a.user)
@@ -72,13 +99,16 @@ class GroupSerializer(Serializer):
 
             annotations = []
             for plugin in plugins.for_project(project=item.project, version=1):
-                safe_execute(plugin.tags, None, item, annotations)
+                safe_execute(plugin.tags, None, item, annotations,
+                             _with_transaction=False)
             for plugin in plugins.for_project(project=item.project, version=2):
-                annotations.extend(safe_execute(plugin.get_annotations, group=item) or ())
+                annotations.extend(safe_execute(plugin.get_annotations, group=item,
+                                                _with_transaction=False) or ())
 
             result[item] = {
                 'assigned_to': serialize(assignees.get(item.id)),
                 'is_bookmarked': item.id in bookmarks,
+                'is_subscribed': item.id in subscriptions,
                 'has_seen': seen_groups.get(item.id, active_date) > active_date,
                 'annotations': annotations,
                 'user_count': user_counts.get(item.id, 0),
@@ -114,24 +144,13 @@ class GroupSerializer(Serializer):
         permalink = absolute_uri(reverse('sentry-group', args=[
             obj.organization.slug, obj.project.slug, obj.id]))
 
-        event_type = obj.data.get('type', 'default')
-        metadata = obj.data.get('metadata') or {
-            'title': obj.message_short,
-        }
-        # TODO(dcramer): remove in 8.6+
-        if event_type == 'error':
-            if 'value' in metadata:
-                metadata['value'] = unicode(metadata['value'])
-            if 'type' in metadata:
-                metadata['type'] = unicode(metadata['type'])
-
         return {
-            'id': str(obj.id),
+            'id': six.text_type(obj.id),
             'shareId': obj.get_share_id(),
             'shortId': obj.qualified_short_id,
-            'count': str(obj.times_seen),
+            'count': six.text_type(obj.times_seen),
             'userCount': attrs['user_count'],
-            'title': obj.message_short,
+            'title': obj.title,
             'culprit': obj.culprit,
             'permalink': permalink,
             'firstSeen': obj.first_seen,
@@ -145,11 +164,12 @@ class GroupSerializer(Serializer):
                 'name': obj.project.name,
                 'slug': obj.project.slug,
             },
-            'type': event_type,
-            'metadata': metadata,
+            'type': obj.get_event_type(),
+            'metadata': obj.get_event_metadata(),
             'numComments': obj.num_comments,
             'assignedTo': attrs['assigned_to'],
             'isBookmarked': attrs['is_bookmarked'],
+            'isSubscribed': attrs['is_subscribed'],
             'hasSeen': attrs['has_seen'],
             'annotations': attrs['annotations'],
         }
@@ -173,10 +193,10 @@ class StreamGroupSerializer(GroupSerializer):
     def get_attrs(self, item_list, user):
         attrs = super(StreamGroupSerializer, self).get_attrs(item_list, user)
 
-        # we need to compute stats at 1d (1h resolution), and 14d
-        group_ids = [g.id for g in item_list]
-
         if self.stats_period:
+            # we need to compute stats at 1d (1h resolution), and 14d
+            group_ids = [g.id for g in item_list]
+
             segments, interval = self.STATS_PERIOD_CHOICES[self.stats_period]
             now = timezone.now()
             stats = tsdb.get_range(

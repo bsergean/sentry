@@ -3,6 +3,7 @@
 {% load crispy_forms_tags %}
 {% load i18n %}
 {% load sentry_helpers %}
+{% load sentry_features %}
 
 {% block title %}{% trans "Account Settings" %} | {{ block.super }}{% endblock %}
 
@@ -10,6 +11,13 @@
     <form action="" method="post">
         {% csrf_token %}
         {{ form|as_crispy_errors }}
+
+        {% if request.user.has_unverified_emails %}
+          <div class="alert alert-warning alert-block">
+            {% trans "Your email address has not been verified. " %}
+            <a href="{% url 'sentry-account-confirm-email-send' %}">{% trans "Resend Verification Email" %}</a>.
+          </div>
+        {% endif %}
 
         <legend style="margin-top: 0;">Your details</legend>
 
@@ -32,30 +40,36 @@
           </div>
           <div class="account-settings-body">
             {% with form.name as field %}
-                {{ field|as_crispy_field }}
+              {{ field|as_crispy_field }}
             {% endwith %}
             {% if form.username %}
-                {% with form.username as field %}
-                    {{ field|as_crispy_field }}
-                {% endwith %}
+              {% with form.username as field %}
+                {{ field|as_crispy_field }}
+              {% endwith %}
             {% endif %}
             {% with form.email as field %}
-                {{ field|as_crispy_field }}
+              {{ field|as_crispy_field }}
             {% endwith %}
             {% if form.new_password %}
+              <p class="help-block pull-right" style="margin-top: 0">({% trans "Optional" %})</p>
+              {% with form.new_password as field %}
+                {{ field|as_crispy_field }}
+              {% endwith %}
+            {% endif %}
           </div>
         </div>
-        <hr>
-        <p>{% trans "You may also optionally change your password." %}</p>
-        {% with form.new_password as field %}
-            {{ field|as_crispy_field }}
-        {% endwith %}
+
+        {% if form.password %}
+          <legend>{% trans "Verification"  %}</legend>
+          {% with form.password as field %}
+              {{ field|as_crispy_field }}
+          {% endwith %}
         {% endif %}
 
         {% if not form.is_readonly %}
-        <fieldset class="form-actions">
-            <button type="submit" class="btn btn-primary">{% trans "Save Changes" %}</button>
-        </fieldset>
+          <fieldset class="form-actions">
+              <button type="submit" class="btn btn-primary">{% trans "Save Changes" %}</button>
+          </fieldset>
         {% endif %}
     </form>
 {% endblock %}

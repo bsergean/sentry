@@ -3,12 +3,14 @@ from __future__ import absolute_import
 from django import forms
 from django.contrib import messages
 from django.core.urlresolvers import reverse
+from django.utils.crypto import constant_time_compare
 from django.utils.translation import ugettext_lazy as _
 
 from sentry.models import (
-    AuditLogEntry, AuditLogEntryEvent, OrganizationMember, Project
+    AuditLogEntryEvent, OrganizationMember, Project
 )
 from sentry.signals import member_joined
+from sentry.utils import auth
 from sentry.web.frontend.base import BaseView
 
 ERR_INVITE_INVALID = _('The invite link you followed is not valid.')
@@ -27,7 +29,7 @@ class AcceptOrganizationInviteView(BaseView):
         return AcceptInviteForm()
 
     def handle(self, request, member_id, token):
-        assert request.method in ['POST', 'GET']
+        assert request.method in ('POST', 'GET')
 
         try:
             om = OrganizationMember.objects.get(pk=member_id)
@@ -47,7 +49,7 @@ class AcceptOrganizationInviteView(BaseView):
 
             return self.redirect(reverse('sentry'))
 
-        if om.token != token:
+        if not constant_time_compare(om.token or om.legacy_token, token):
             messages.add_message(
                 request, messages.ERROR,
                 ERR_INVITE_INVALID,
@@ -71,8 +73,9 @@ class AcceptOrganizationInviteView(BaseView):
 
         if not request.user.is_authenticated():
             # Show login or register form
-            request.session['_next'] = request.get_full_path()
+            auth.initiate_login(request, next_url=request.get_full_path())
             request.session['can_register'] = True
+            request.session['invite_email'] = om.email
 
             return self.respond('sentry/accept-organization-invite.html', context)
 
@@ -92,10 +95,9 @@ class AcceptOrganizationInviteView(BaseView):
                 om.email = None
                 om.save()
 
-                AuditLogEntry.objects.create(
+                self.create_audit_entry(
+                    request,
                     organization=organization,
-                    actor=request.user,
-                    ip_address=request.META['REMOTE_ADDR'],
                     target_object=om.id,
                     target_user=request.user,
                     event=AuditLogEntryEvent.MEMBER_ACCEPT,

@@ -8,7 +8,7 @@ import getpass
 SENTRY_APIDOCS_REDIS_PORT = 12355
 SENTRY_APIDOCS_WEB_PORT = 12356
 
-SENTRY_URL_PREFIX = 'https://app.getsentry.com'
+SENTRY_URL_PREFIX = 'https://sentry.io'
 
 # Unsupported here
 SENTRY_SINGLE_ORGANIZATION = False
@@ -52,7 +52,7 @@ SENTRY_WEB_OPTIONS = {
 SENTRY_OPTIONS.update({
     'redis.clusters': {
         'default': {
-            'hosts': {i: {'port': SENTRY_APIDOCS_REDIS_PORT} for i in xrange(0, 4)},
+            'hosts': {i: {'port': SENTRY_APIDOCS_REDIS_PORT} for i in range(0, 4)},
         },
     },
     'system.secret-key': 'super secret secret key',

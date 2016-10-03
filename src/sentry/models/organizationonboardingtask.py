@@ -5,6 +5,8 @@ sentry.models.organizationonboardingtask
 :copyright: (c) 2010-2016 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
+
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
@@ -58,6 +60,8 @@ class OrganizationOnboardingTask(Model):
         ISSUE_ASSIGNMENT: { 'assigned_member': user.id }
         SECOND_PLATFORM: { 'platform': 'javascript' }
     """
+    __core__ = False
+
     TASK_CHOICES = (
         (OnboardingTask.FIRST_EVENT, 'First event'),  # Send an organization's first event to Sentry
         (OnboardingTask.INVITE_MEMBER, 'Invite member'),  # Add a second member to your Sentry org.

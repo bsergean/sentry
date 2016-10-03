@@ -1,4 +1,5 @@
 from __future__ import absolute_import
+import string
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -6,7 +7,8 @@ from rest_framework import serializers
 from rest_framework.response import Response
 
 from sentry.api.base import DocSection
-from sentry.api.bases.project import ProjectEndpoint
+from sentry.api.bases.project import ProjectEndpoint, ProjectReleasePermission
+from sentry.api.paginator import OffsetPaginator
 from sentry.api.fields.user import UserField
 from sentry.api.serializers import serialize
 from sentry.models import Activity, Release
@@ -43,9 +45,16 @@ class ReleaseSerializer(serializers.Serializer):
     dateStarted = serializers.DateTimeField(required=False)
     dateReleased = serializers.DateTimeField(required=False)
 
+    def validate_version(self, attrs, source):
+        value = attrs[source]
+        if not set(value).isdisjoint(set(string.whitespace)):
+            raise serializers.ValidationError('Enter a valid value')
+        return attrs
+
 
 class ProjectReleasesEndpoint(ProjectEndpoint):
     doc_section = DocSection.RELEASES
+    permission_classes = (ProjectReleasePermission,)
 
     @attach_scenarios([list_releases_scenario])
     def get(self, request, project):
@@ -73,10 +82,15 @@ class ProjectReleasesEndpoint(ProjectEndpoint):
                 version__istartswith=query,
             )
 
+        queryset = queryset.extra(select={
+            'sort': 'COALESCE(date_released, date_added)',
+        })
+
         return self.paginate(
             request=request,
             queryset=queryset,
-            order_by='-id',
+            order_by='-sort',
+            paginator_cls=OffsetPaginator,
             on_results=lambda x: serialize(x, request.user),
         )
 

@@ -9,6 +9,8 @@ from django.utils.translation import ugettext_lazy as _
 from django.views.decorators.cache import never_cache
 
 from sentry import features
+from sentry.constants import WARN_SESSION_EXPIRED
+from sentry.http import get_server_hostname
 from sentry.models import AuthProvider, Organization, OrganizationStatus
 from sentry.web.forms.accounts import AuthenticationForm, RegistrationForm
 from sentry.web.frontend.base import BaseView
@@ -42,14 +44,13 @@ class AuthLoginView(BaseView):
         op = request.POST.get('op')
         return AuthenticationForm(
             request, request.POST if op == 'login' else None,
-            captcha=bool(request.session.get('needs_captcha')),
         )
 
-    def get_register_form(self, request):
+    def get_register_form(self, request, initial=None):
         op = request.POST.get('op')
         return RegistrationForm(
             request.POST if op == 'register' else None,
-            captcha=bool(request.session.get('needs_captcha')),
+            initial=initial,
         )
 
     def handle_basic_auth(self, request):
@@ -64,12 +65,15 @@ class AuthLoginView(BaseView):
 
         login_form = self.get_login_form(request)
         if can_register:
-            register_form = self.get_register_form(request)
+            register_form = self.get_register_form(request, initial={
+                'username': request.session.get('invite_email', '')
+            })
         else:
             register_form = None
 
         if can_register and register_form.is_valid():
             user = register_form.save()
+            user.send_confirm_emails(is_new_user=True)
 
             # HACK: grab whatever the first backend is and assume it works
             user.backend = settings.AUTHENTICATION_BACKENDS[0]
@@ -78,8 +82,7 @@ class AuthLoginView(BaseView):
 
             # can_register should only allow a single registration
             request.session.pop('can_register', None)
-
-            request.session.pop('needs_captcha', None)
+            request.session.pop('invite_email', None)
 
             return self.redirect(auth.get_login_redirect(request))
 
@@ -88,26 +91,16 @@ class AuthLoginView(BaseView):
 
             auth.login(request, user)
 
-            request.session.pop('needs_captcha', None)
-
             if not user.is_active:
                 return self.redirect(reverse('sentry-reactivate-account'))
 
             return self.redirect(auth.get_login_redirect(request))
 
-        elif request.POST and not request.session.get('needs_captcha'):
-            auth.log_auth_failure(request, request.POST.get('username'))
-            request.session['needs_captcha'] = 1
-            login_form = self.get_login_form(request)
-            login_form.errors.pop('captcha', None)
-            if can_register:
-                register_form = self.get_register_form(request)
-                register_form.errors.pop('captcha', None)
-
         request.session.set_test_cookie()
 
         context = {
             'op': op or 'login',
+            'server_hostname': get_server_hostname(),
             'login_form': login_form,
             'register_form': register_form,
             'CAN_REGISTER': can_register,
@@ -132,6 +125,14 @@ class AuthLoginView(BaseView):
     @never_cache
     @transaction.atomic
     def handle(self, request):
+        redirect_next = request.GET.get('next', None)
+        if redirect_next:
+            # TODO: enforce max redirect_next limit? (potential for abuse?)
+            request.session['_next'] = redirect_next
+
+        if request.user.is_authenticated():
+            return self.redirect_to_org(request)
+
         # Single org mode -- send them to the org-specific handler
         if settings.SENTRY_SINGLE_ORGANIZATION:
             org = Organization.get_default()
@@ -150,4 +151,14 @@ class AuthLoginView(BaseView):
                 messages.add_message(request, messages.ERROR, ERR_NO_SSO)
 
             return HttpResponseRedirect(next_uri)
-        return self.handle_basic_auth(request)
+
+        session_expired = 'session_expired' in request.COOKIES
+        if session_expired:
+            messages.add_message(request, messages.WARNING, WARN_SESSION_EXPIRED)
+
+        response = self.handle_basic_auth(request)
+
+        if session_expired:
+            response.delete_cookie('session_expired')
+
+        return response

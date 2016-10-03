@@ -12,9 +12,7 @@ from multiprocessing import cpu_count
 
 import click
 
-from sentry.runner.decorators import configuration
-
-CELERY_LOG_LEVELS = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL', 'FATAL')
+from sentry.runner.decorators import configuration, log_options
 
 
 class AddressParamType(click.ParamType):
@@ -37,11 +35,6 @@ class AddressParamType(click.ParamType):
 Address = AddressParamType()
 
 
-class CaseInsensitiveChoice(click.Choice):
-    def convert(self, value, param, ctx):
-        return super(CaseInsensitiveChoice, self).convert(value.upper(), param, ctx)
-
-
 class SetType(click.ParamType):
     name = 'text'
 
@@ -62,17 +55,25 @@ def run():
 @click.option('--bind', '-b', default=None, help='Bind address.', type=Address)
 @click.option('--workers', '-w', default=0, help='The number of worker processes for handling requests.')
 @click.option('--upgrade', default=False, is_flag=True, help='Upgrade before starting.')
+@click.option('--with-lock', default=False, is_flag=True, help='Use a lock if performing an upgrade.')
 @click.option('--noinput', default=False, is_flag=True, help='Do not prompt the user for input of any kind.')
+@log_options()
 @configuration
-def web(bind, workers, upgrade, noinput):
+def web(bind, workers, upgrade, with_lock, noinput):
     "Run web service."
     if upgrade:
         click.echo('Performing upgrade before service startup...')
         from sentry.runner import call_command
-        call_command(
-            'sentry.runner.commands.upgrade.upgrade',
-            verbosity=0, noinput=noinput,
-        )
+        try:
+            call_command(
+                'sentry.runner.commands.upgrade.upgrade',
+                verbosity=0, noinput=noinput, lock=with_lock,
+            )
+        except click.ClickException:
+            if with_lock:
+                click.echo('!! Upgrade currently running from another process, skipping.', err=True)
+            else:
+                raise
 
     from sentry.services.http import SentryHTTPServer
     SentryHTTPServer(
@@ -117,13 +118,12 @@ def smtp(bind, upgrade, noinput):
     'Number of child processes processing the queue. The '
     'default is the number of CPUs available on your '
     'system.'))
-@click.option('--loglevel', '-l', default='WARNING', help='Logging level.',
-    type=CaseInsensitiveChoice(CELERY_LOG_LEVELS))
 @click.option('--logfile', '-f', help=(
     'Path to log file. If no logfile is specified, stderr is used.'))
 @click.option('--quiet', '-q', is_flag=True, default=False)
 @click.option('--no-color', is_flag=True, default=False)
 @click.option('--autoreload', is_flag=True, default=False, help='Enable autoreloading.')
+@log_options()
 @configuration
 def worker(**options):
     "Run background worker instance."
@@ -133,9 +133,9 @@ def worker(**options):
 
     from sentry.celery import app
     worker = app.Worker(
-        without_gossip=True,
-        without_mingle=True,
-        without_heartbeat=True,
+        # without_gossip=True,
+        # without_mingle=True,
+        # without_heartbeat=True,
         pool_cls='processes',
         **options
     )
@@ -154,13 +154,12 @@ def worker(**options):
     'Optional file used to store the process pid. The '
     'program will not start if this file already exists and '
     'the pid is still alive.'))
-@click.option('--loglevel', '-l', default='WARNING', help='Logging level.',
-    type=CaseInsensitiveChoice(CELERY_LOG_LEVELS))
 @click.option('--logfile', '-f', help=(
     'Path to log file. If no logfile is specified, stderr is used.'))
 @click.option('--quiet', '-q', is_flag=True, default=False)
 @click.option('--no-color', is_flag=True, default=False)
 @click.option('--autoreload', is_flag=True, default=False, help='Enable autoreloading.')
+@log_options()
 @configuration
 def cron(**options):
     "Run periodic task dispatcher."
@@ -170,8 +169,8 @@ def cron(**options):
 
     from sentry.celery import app
     app.Beat(
-        without_gossip=True,
-        without_mingle=True,
-        without_heartbeat=True,
+        # without_gossip=True,
+        # without_mingle=True,
+        # without_heartbeat=True,
         **options
     ).run()

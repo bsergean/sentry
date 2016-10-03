@@ -2,6 +2,8 @@ from __future__ import absolute_import
 
 __all__ = ['DocSection', 'Endpoint', 'StatsMixin']
 
+import logging
+import six
 import time
 
 from datetime import datetime, timedelta
@@ -19,8 +21,8 @@ from rest_framework.views import APIView
 from sentry.app import raven, tsdb
 from sentry.models import ApiKey, AuditLogEntry
 from sentry.utils.cursors import Cursor
+from sentry.utils.dates import to_datetime
 from sentry.utils.http import absolute_uri, is_valid_origin
-from sentry.utils.performance import SqlQueryCountMonitor
 
 from .authentication import ApiKeyAuthentication, TokenAuthentication
 from .paginator import Paginator
@@ -38,6 +40,9 @@ DEFAULT_AUTHENTICATION = (
     ApiKeyAuthentication,
     SessionAuthentication,
 )
+
+logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger('sentry.audit.api')
 
 
 class DocSection(Enum):
@@ -58,7 +63,7 @@ class Endpoint(APIView):
     def build_cursor_link(self, request, name, cursor):
         querystring = u'&'.join(
             u'{0}={1}'.format(urlquote(k), urlquote(v))
-            for k, v in request.GET.iteritems()
+            for k, v in six.iteritems(request.GET)
             if k != 'cursor'
         )
         base_url = absolute_uri(request.path)
@@ -69,7 +74,7 @@ class Endpoint(APIView):
 
         return LINK_HEADER.format(
             uri=base_url,
-            cursor=str(cursor),
+            cursor=six.text_type(cursor),
             name=name,
             has_results='true' if bool(cursor) else 'false',
         )
@@ -95,16 +100,45 @@ class Endpoint(APIView):
             }
             return Response(context, status=500)
 
-    def create_audit_entry(self, request, **kwargs):
+    def create_audit_entry(self, request, transaction_id=None, **kwargs):
         user = request.user if request.user.is_authenticated() else None
         api_key = request.auth if isinstance(request.auth, ApiKey) else None
 
-        AuditLogEntry.objects.create(
+        entry = AuditLogEntry.objects.create(
             actor=user,
             actor_key=api_key,
             ip_address=request.META['REMOTE_ADDR'],
             **kwargs
         )
+
+        extra = {
+            'ip_address': entry.ip_address,
+            'organization_id': entry.organization_id,
+            'object_id': entry.target_object,
+            'entry_id': entry.id,
+            'actor_label': entry.actor_label
+        }
+        if entry.actor_id:
+            extra['actor_id'] = entry.actor_id
+        if entry.actor_key_id:
+            extra['actor_key_id'] = entry.actor_key_id
+        if transaction_id is not None:
+            extra['transaction_id'] = transaction_id
+
+        audit_logger.info(entry.get_event_display(), extra=extra)
+
+        return entry
+
+    def initialize_request(self, request, *args, **kwargs):
+        rv = super(Endpoint, self).initialize_request(request, *args, **kwargs)
+        # If our request is being made via our internal API client, we need to
+        # stitch back on auth and user information
+        if getattr(request, '__from_api_client__', False):
+            if rv.auth is None:
+                rv.auth = getattr(request, 'auth', None)
+            if rv.user is None:
+                rv.user = getattr(request, 'user', None)
+        return rv
 
     @csrf_exempt
     def dispatch(self, request, *args, **kwargs):
@@ -118,20 +152,19 @@ class Endpoint(APIView):
         self.request = request
         self.headers = self.default_response_headers  # deprecate?
 
-        metric_name = '{}.{}'.format(type(self).__name__, request.method.lower())
-
         if settings.SENTRY_API_RESPONSE_DELAY:
             time.sleep(settings.SENTRY_API_RESPONSE_DELAY / 1000.0)
 
         origin = request.META.get('HTTP_ORIGIN')
-        if origin and request.auth:
-            allowed_origins = request.auth.get_allowed_origins()
-            if not is_valid_origin(origin, allowed=allowed_origins):
-                response = Response('Invalid origin: %s' % (origin,), status=400)
-                self.response = self.finalize_response(request, response, *args, **kwargs)
-                return self.response
 
         try:
+            if origin and request.auth:
+                allowed_origins = request.auth.get_allowed_origins()
+                if not is_valid_origin(origin, allowed=allowed_origins):
+                    response = Response('Invalid origin: %s' % (origin,), status=400)
+                    self.response = self.finalize_response(request, response, *args, **kwargs)
+                    return self.response
+
             self.initial(request, *args, **kwargs)
 
             # Get the appropriate handler method
@@ -145,8 +178,7 @@ class Endpoint(APIView):
             else:
                 handler = self.http_method_not_allowed
 
-            with SqlQueryCountMonitor(metric_name):
-                response = handler(request, *args, **kwargs)
+            response = handler(request, *args, **kwargs)
 
         except Exception as exc:
             response = self.handle_exception(request, exc)
@@ -202,13 +234,14 @@ class StatsMixin(object):
 
         end = request.GET.get('until')
         if end:
-            end = datetime.fromtimestamp(float(end)).replace(tzinfo=utc)
+            end = to_datetime(float(end))
         else:
             end = datetime.utcnow().replace(tzinfo=utc)
 
         start = request.GET.get('since')
         if start:
-            start = datetime.fromtimestamp(float(start)).replace(tzinfo=utc)
+            start = to_datetime(float(start))
+            assert start <= end, 'start must be before or equal to end'
         else:
             start = end - timedelta(days=1, seconds=-1)
 

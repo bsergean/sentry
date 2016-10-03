@@ -1,5 +1,7 @@
 from __future__ import absolute_import
 
+import six
+
 from collections import defaultdict
 from django.db.models import Q
 
@@ -33,11 +35,22 @@ class ProjectSerializer(Serializer):
                     Q(user=user, key='subscribe_by_default', project__isnull=True)
                 )
             }
-            default_subscribe = int(user_options.get('subscribe_by_default', 1))
+            default_subscribe = (
+                user_options.get('subscribe_by_default', '1') == '1'
+            )
+
+            default_environments = {
+                o.project_id: o.value
+                for o in ProjectOption.objects.filter(
+                    key='sentry:default_environment',
+                    project__in=project_ids,
+                )
+            }
         else:
             bookmarks = set()
             user_options = {}
             default_subscribe = False
+            default_environments = {}
 
         reviewed_callsigns = {
             p.project_id: p.value
@@ -62,6 +75,7 @@ class ProjectSerializer(Serializer):
                     (item.id, 'mail:alert'),
                     default_subscribe,
                 )),
+                'default_environment': default_environments.get(item.id),
                 'reviewed-callsign': reviewed_callsigns.get(item.id),
                 'platforms': platforms_by_project[item.id],
             }
@@ -71,18 +85,19 @@ class ProjectSerializer(Serializer):
         from sentry import features
 
         feature_list = []
-        for feature in ('breadcrumbs', 'global-events'):
+        for feature in ('global-events',):
             if features.has('projects:' + feature, obj, actor=user):
                 feature_list.append(feature)
 
         status_label = STATUS_LABELS.get(obj.status, 'unknown')
 
         return {
-            'id': str(obj.id),
+            'id': six.text_type(obj.id),
             'slug': obj.slug,
             'name': obj.name,
             'isPublic': obj.public,
             'isBookmarked': attrs['is_bookmarked'],
+            'defaultEnvironment': attrs['default_environment'],
             'callSign': obj.callsign,
             'color': obj.color,
             # TODO(mitsuhiko): eventually remove this when we will treat
@@ -107,7 +122,7 @@ class ProjectWithOrganizationSerializer(ProjectSerializer):
             for d in serialize(list(set(i.organization for i in item_list)), user)
         }
         for item in item_list:
-            attrs[item]['organization'] = orgs[str(item.organization_id)]
+            attrs[item]['organization'] = orgs[six.text_type(item.organization_id)]
         return attrs
 
     def serialize(self, obj, attrs, user):

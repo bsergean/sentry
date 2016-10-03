@@ -1,8 +1,10 @@
 from __future__ import absolute_import
 
 import operator
+import six
 
 from django.db.models import Q
+from six.moves import reduce
 
 from sentry.api.serializers import Serializer, register
 from sentry.models import EventUser, TagKey, TagValue
@@ -49,10 +51,19 @@ class TagValueSerializer(Serializer):
 
     def serialize(self, obj, attrs, user):
         return {
+            'id': six.text_type(obj.id),
             'key': TagKey.get_standardized_key(obj.key),
             'name': attrs['name'],
             'value': obj.value,
             'count': obj.times_seen,
             'lastSeen': obj.last_seen,
             'firstSeen': obj.first_seen,
+        }
+
+
+class EnvironmentTagValueSerializer(Serializer):
+    def serialize(self, obj, attrs, user):
+        return {
+            'id': six.text_type(obj.id),
+            'name': obj.value,
         }

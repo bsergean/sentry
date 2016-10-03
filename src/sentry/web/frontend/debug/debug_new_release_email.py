@@ -1,13 +1,11 @@
 from __future__ import absolute_import
 
-from django.core.urlresolvers import reverse
 from django.views.generic import View
 from hashlib import sha1
 from uuid import uuid4
 
 from sentry.models import Organization, Team, Project, Release
 from sentry.utils.http import absolute_uri
-from sentry.web.helpers import render_to_response
 
 from .mail import MailPreview
 
@@ -34,7 +32,7 @@ class DebugNewReleaseEmailView(View):
         )
         release = Release(
             project=project,
-            version=sha1(uuid4().hex).hexdigest(),
+            version=sha1(uuid4().bytes).hexdigest(),
         )
 
         release_link = absolute_uri('/{}/{}/releases/{}/'.format(
@@ -43,12 +41,12 @@ class DebugNewReleaseEmailView(View):
             release.version,
         ))
 
-        project_link = absolute_uri(reverse('sentry-stream', kwargs={
-            'organization_slug': org.slug,
-            'project_id': project.slug,
-        }))
+        project_link = absolute_uri('/{}/{}/'.format(
+            org.slug,
+            project.slug,
+        ))
 
-        preview = MailPreview(
+        return MailPreview(
             html_template='sentry/emails/activity/release.html',
             text_template='sentry/emails/activity/release.txt',
             context={
@@ -57,8 +55,4 @@ class DebugNewReleaseEmailView(View):
                 'release_link': release_link,
                 'project_link': project_link,
             },
-        )
-
-        return render_to_response('sentry/debug/mail/preview.html', {
-            'preview': preview,
-        })
+        ).render(request)

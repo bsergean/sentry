@@ -7,11 +7,13 @@ sentry.tsdb.inmemory
 """
 from __future__ import absolute_import
 
+import six
+
 from collections import Counter, defaultdict
-from datetime import timedelta
 
 from django.utils import timezone
 
+from sentry.utils.dates import to_datetime, to_timestamp
 from sentry.tsdb.base import BaseTSDB
 
 
@@ -34,29 +36,21 @@ class InMemoryTSDB(BaseTSDB):
             self.data[model][key][norm_epoch] += count
 
     def get_range(self, model, keys, start, end, rollup=None):
-        normalize_to_epoch = self.normalize_to_epoch
-        normalize_to_rollup = self.normalize_to_rollup
-
-        if rollup is None:
-            rollup = self.get_optimal_rollup(start, end)
+        rollup, series = self.get_optimal_rollup_series(start, end, rollup)
 
         results = []
-        timestamp = end
-        while timestamp >= start:
-            real_epoch = normalize_to_epoch(timestamp, rollup)
-            norm_epoch = normalize_to_rollup(timestamp, rollup)
+        for timestamp in map(to_datetime, series):
+            norm_epoch = self.normalize_to_rollup(timestamp, rollup)
 
             for key in keys:
                 value = self.data[model][key][norm_epoch]
-                results.append((real_epoch, key, value))
-
-            timestamp = timestamp - timedelta(seconds=rollup)
+                results.append((to_timestamp(timestamp), key, value))
 
         results_by_key = defaultdict(dict)
         for epoch, key, count in results:
             results_by_key[key][epoch] = int(count or 0)
 
-        for key, points in results_by_key.iteritems():
+        for key, points in six.iteritems(results_by_key):
             results_by_key[key] = sorted(points.items())
         return dict(results_by_key)
 
@@ -94,6 +88,18 @@ class InMemoryTSDB(BaseTSDB):
             results[key] = len(values)
 
         return results
+
+    def get_distinct_counts_union(self, model, keys, start, end=None, rollup=None):
+        rollup, series = self.get_optimal_rollup_series(start, end, rollup)
+
+        values = set()
+        for key in keys:
+            source = self.sets[model][key]
+            for timestamp in series:
+                r = self.normalize_ts_to_rollup(timestamp, rollup)
+                values.update(source[r])
+
+        return len(values)
 
     def flush(self):
         # model => key => timestamp = count
@@ -162,7 +168,7 @@ class InMemoryTSDB(BaseTSDB):
     def get_frequency_totals(self, model, items, start, end=None, rollup=None):
         results = {}
 
-        for key, series in self.get_frequency_series(model, items, start, end, rollup).iteritems():
+        for key, series in six.iteritems(self.get_frequency_series(model, items, start, end, rollup)):
             result = results[key] = {}
             for timestamp, scores in series:
                 for member, score in scores.items():

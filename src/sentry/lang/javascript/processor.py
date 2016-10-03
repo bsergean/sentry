@@ -5,6 +5,7 @@ __all__ = ['SourceProcessor']
 import logging
 import re
 import base64
+import six
 import zlib
 
 from django.conf import settings
@@ -13,7 +14,7 @@ from django.utils.encoding import force_bytes, force_text
 from collections import namedtuple
 from os.path import splitext
 from requests.exceptions import RequestException
-from urlparse import urlparse, urljoin, urlsplit
+from six.moves.urllib.parse import urlparse, urljoin, urlsplit
 
 # In case SSL is unavailable (light builds) we can't import this here.
 try:
@@ -29,12 +30,12 @@ from sentry.interfaces.stacktrace import Stacktrace
 from sentry.models import EventError, Release, ReleaseFile
 from sentry.utils.cache import cache
 from sentry.utils.files import compress_file
-from sentry.utils.hashlib import md5
+from sentry.utils.hashlib import md5_text
 from sentry.utils.http import is_valid_origin
 from sentry.utils.strings import truncatechars
 
 from .cache import SourceCache, SourceMapCache
-from .sourcemaps import sourcemap_to_index, find_source
+from .sourcemaps import sourcemap_to_index, find_source, get_inline_content_sources
 
 
 # number of surrounding lines (on each side) to fetch
@@ -57,13 +58,26 @@ VERSION_RE = re.compile(r'^[a-f0-9]{32}|[a-f0-9]{40}$', re.I)
 # the maximum number of remote resources (i.e. sourc eifles) that should be
 # fetched
 MAX_RESOURCE_FETCHES = 100
+MAX_URL_LENGTH = 150
 
 # TODO(dcramer): we want to change these to be constants so they are easier
 # to translate/link again
 
+# UrlResult.body **must** be unicode
 UrlResult = namedtuple('UrlResult', ['url', 'headers', 'body'])
 
 logger = logging.getLogger(__name__)
+
+
+def expose_url(url):
+    if url is None:
+        return u'<unknown>'
+    if url[:5] == 'data:':
+        return u'<data url>'
+    url = truncatechars(url, MAX_URL_LENGTH)
+    if isinstance(url, bytes):
+        url = url.decode('utf-8', 'replace')
+    return url
 
 
 class BadSource(Exception):
@@ -92,7 +106,7 @@ def trim_line(line, column=0):
     `column`. So it tries to extract 60 characters before and after
     the provided `column` and yield a better context.
     """
-    line = line.strip('\n')
+    line = line.strip(u'\n')
     ll = len(line)
     if ll <= 150:
         return line
@@ -113,10 +127,10 @@ def trim_line(line, column=0):
     line = line[start:end]
     if end < ll:
         # we've snipped from the end
-        line += ' {snip}'
+        line += u' {snip}'
     if start > 0:
         # we've snipped from the beginning
-        line = '{snip} ' + line
+        line = u'{snip} ' + line
     return line
 
 
@@ -133,7 +147,7 @@ def get_source_context(source, lineno, colno, context=LINES_OF_CONTEXT):
     upper_bound = min(lineno + 1 + context, len(source))
 
     try:
-        pre_context = map(trim_line, source[lower_bound:lineno])
+        pre_context = [trim_line(x) for x in source[lower_bound:lineno]]
     except IndexError:
         pre_context = []
 
@@ -143,7 +157,7 @@ def get_source_context(source, lineno, colno, context=LINES_OF_CONTEXT):
         context_line = ''
 
     try:
-        post_context = map(trim_line, source[(lineno + 1):upper_bound])
+        post_context = [trim_line(x) for x in source[(lineno + 1):upper_bound]]
     except IndexError:
         post_context = []
 
@@ -159,7 +173,7 @@ def discover_sourcemap(result):
     sourcemap = result.headers.get('sourcemap', result.headers.get('x-sourcemap'))
 
     if not sourcemap:
-        parsed_body = result.body.split('\n')
+        parsed_body = result.body.split(u'\n')
         # Source maps are only going to exist at either the top or bottom of the document.
         # Technically, there isn't anything indicating *where* it should exist, so we
         # are generous and assume it's somewhere either in the first or last 5 lines.
@@ -172,11 +186,28 @@ def discover_sourcemap(result):
         # We want to scan each line sequentially, and the last one found wins
         # This behavior is undocumented, but matches what Chrome and Firefox do.
         for line in possibilities:
-            if line[:21] in ('//# sourceMappingURL=', '//@ sourceMappingURL='):
+            if line[:21] in (u'//# sourceMappingURL=', u'//@ sourceMappingURL='):
                 # We want everything AFTER the indicator, which is 21 chars long
                 sourcemap = line[21:].rstrip()
 
     if sourcemap:
+        # react-native shoves a comment at the end of the
+        # sourceMappingURL line.
+        # For example:
+        #  sourceMappingURL=app.js.map/*ascii:...*/
+        # This comment is completely out of spec and no browser
+        # would support this, but we need to strip it to make
+        # people happy.
+        if '/*' in sourcemap and sourcemap[-2:] == '*/':
+            index = sourcemap.index('/*')
+            # comment definitely shouldn't be the first character,
+            # so let's just make sure of that.
+            if index == 0:
+                raise AssertionError(
+                    'react-native comment found at bad location: %d, %r' %
+                    (index, sourcemap)
+                )
+            sourcemap = sourcemap[:index]
         # fix url so its absolute
         sourcemap = urljoin(result.url, sourcemap)
 
@@ -186,25 +217,47 @@ def discover_sourcemap(result):
 def fetch_release_file(filename, release):
     cache_key = 'releasefile:v1:%s:%s' % (
         release.id,
-        md5(filename).hexdigest(),
+        md5_text(filename).hexdigest(),
     )
+
+    filename_path = None
+    if filename is not None:
+        # Reconstruct url without protocol + host
+        # e.g. http://example.com/foo?bar => ~/foo?bar
+        parsed_url = urlparse(filename)
+        filename_path = '~' + parsed_url.path
+        if parsed_url.query:
+            filename_path += '?' + parsed_url.query
+
     logger.debug('Checking cache for release artifact %r (release_id=%s)',
                  filename, release.id)
     result = cache.get(cache_key)
+
     if result is None:
         logger.debug('Checking database for release artifact %r (release_id=%s)',
                      filename, release.id)
-        ident = ReleaseFile.get_ident(filename)
-        try:
-            releasefile = ReleaseFile.objects.filter(
-                release=release,
-                ident=ident,
-            ).select_related('file').get()
-        except ReleaseFile.DoesNotExist:
+
+        filename_idents = [ReleaseFile.get_ident(filename)]
+        if filename_path is not None and filename_path != filename:
+            filename_idents.append(ReleaseFile.get_ident(filename_path))
+
+        possible_files = list(ReleaseFile.objects.filter(
+            release=release,
+            ident__in=filename_idents,
+        ).select_related('file'))
+
+        if len(possible_files) == 0:
             logger.debug('Release artifact %r not found in database (release_id=%s)',
                          filename, release.id)
             cache.set(cache_key, -1, 60)
             return None
+        elif len(possible_files) == 1:
+            releasefile = possible_files[0]
+        else:
+            # Prioritize releasefile that matches full url (w/ host)
+            # over hostless releasefile
+            target_ident = filename_idents[0]
+            releasefile = next((f for f in possible_files if f.ident == target_ident))
 
         logger.debug('Found release artifact %r (id=%s, release_id=%s)',
                      filename, releasefile.id, release.id)
@@ -212,13 +265,23 @@ def fetch_release_file(filename, release):
             with releasefile.file.getfile() as fp:
                 z_body, body = compress_file(fp)
         except Exception as e:
-            logger.exception(unicode(e))
+            logger.exception(six.text_type(e))
             cache.set(cache_key, -1, 3600)
             result = None
         else:
-            # Write the compressed version to cache, but return the deflated version
-            cache.set(cache_key, (releasefile.file.headers, z_body, 200), 3600)
-            result = (releasefile.file.headers, body, 200)
+            try:
+                result = (releasefile.file.headers, body.decode('utf-8'), 200)
+            except UnicodeDecodeError:
+                error = {
+                    'type': EventError.JS_INVALID_SOURCE_ENCODING,
+                    'value': 'utf8',
+                    'url': expose_url(releasefile.name),
+                }
+                raise CannotFetchSource(error)
+            else:
+                # Write the compressed version to cache, but return the deflated version
+                cache.set(cache_key, (releasefile.file.headers, z_body, 200), 3600)
+
     elif result == -1:
         # We cached an error, so normalize
         # it down to None
@@ -227,7 +290,15 @@ def fetch_release_file(filename, release):
         # We got a cache hit, but the body is compressed, so we
         # need to decompress it before handing it off
         body = zlib.decompress(result[1])
-        result = (result[0], body, result[2])
+        try:
+            result = (result[0], body.decode('utf-8'), result[2])
+        except UnicodeDecodeError:
+            error = {
+                'type': EventError.JS_INVALID_SOURCE_ENCODING,
+                'value': 'utf8',
+                'url': expose_url(releasefile.name),
+            }
+            raise CannotFetchSource(error)
 
     return result
 
@@ -244,14 +315,14 @@ def fetch_file(url, project=None, release=None, allow_scraping=True):
         result = None
 
     cache_key = 'source:cache:v3:%s' % (
-        md5(url).hexdigest(),
+        md5_text(url).hexdigest(),
     )
 
     if result is None:
         if not allow_scraping or not url.startswith(('http:', 'https:')):
             error = {
                 'type': EventError.JS_MISSING_SOURCE,
-                'url': url,
+                'url': expose_url(url),
             }
             raise CannotFetchSource(error)
 
@@ -267,7 +338,7 @@ def fetch_file(url, project=None, release=None, allow_scraping=True):
         # lock down domains that are problematic
         domain = urlparse(url).netloc
         domain_key = 'source:blacklist:v2:%s' % (
-            md5(domain).hexdigest(),
+            md5_text(domain).hexdigest(),
         )
         domain_result = cache.get(domain_key)
         if domain_result:
@@ -296,24 +367,24 @@ def fetch_file(url, project=None, release=None, allow_scraping=True):
             if isinstance(exc, RestrictedIPAddress):
                 error = {
                     'type': EventError.RESTRICTED_IP,
-                    'url': url,
+                    'url': expose_url(url),
                 }
             elif isinstance(exc, SuspiciousOperation):
                 error = {
                     'type': EventError.SECURITY_VIOLATION,
-                    'url': url,
+                    'url': expose_url(url),
                 }
             elif isinstance(exc, (RequestException, ZeroReturnError)):
                 error = {
                     'type': EventError.JS_GENERIC_FETCH_ERROR,
-                    'value': str(type(exc)),
-                    'url': url,
+                    'value': six.text_type(type(exc)),
+                    'url': expose_url(url),
                 }
             else:
-                logger.exception(unicode(exc))
+                logger.exception(six.text_type(exc))
                 error = {
                     'type': EventError.UNKNOWN_ERROR,
-                    'url': url,
+                    'url': expose_url(url),
                 }
 
             # TODO(dcramer): we want to be less aggressive on disabling domains
@@ -340,21 +411,36 @@ def fetch_file(url, project=None, release=None, allow_scraping=True):
         error = {
             'type': EventError.JS_INVALID_HTTP_CODE,
             'value': result[2],
-            'url': url,
+            'url': expose_url(url),
         }
         raise CannotFetchSource(error)
 
-    # Make sure the file we're getting back is unicode, if it's not,
+    # For JavaScript files, check if content is something other than JavaScript/JSON (i.e. HTML)
+    # NOTE: possible to have JS files that don't actually end w/ ".js", but this should catch 99% of cases
+    if url.endswith('.js'):
+        # Check if response is HTML by looking if the first non-whitespace character is an open tag ('<').
+        # This cannot parse as valid JS/JSON.
+        # NOTE: not relying on Content-Type header because apps often don't set this correctly
+        body_start = result[1][:20].lstrip()  # Discard leading whitespace (often found before doctype)
+
+        if body_start[:1] == u'<':
+            error = {
+                'type': EventError.JS_INVALID_CONTENT,
+                'url': url,
+            }
+            raise CannotFetchSource(error)
+
+    # Make sure the file we're getting back is six.text_type, if it's not,
     # it's either some encoding that we don't understand, or it's binary
     # data which we can't process.
-    if not isinstance(result[1], unicode):
+    if not isinstance(result[1], six.text_type):
         try:
             result = (result[0], result[1].decode('utf8'), result[2])
         except UnicodeDecodeError:
             error = {
                 'type': EventError.JS_INVALID_SOURCE_ENCODING,
                 'value': 'utf8',
-                'url': url,
+                'url': expose_url(url),
             }
             raise CannotFetchSource(error)
 
@@ -369,19 +455,20 @@ def fetch_sourcemap(url, project=None, release=None, allow_scraping=True):
                             allow_scraping=allow_scraping)
         body = result.body
 
-    # According to various specs[1][2] a SourceMap may be prefixed to force
-    # a Javascript load error.
-    # [1] https://docs.google.com/document/d/1U1RGAehQwRypUTovF1KRlpiOFze0b-_2gc6fAH0KY0k/edit#heading=h.h7yy76c5il9v
-    # [2] http://www.html5rocks.com/en/tutorials/developertools/sourcemaps/#toc-xssi
-    if body.startswith((")]}'\n", ")]}\n")):
-        body = body.split('\n', 1)[1]
-
     try:
+        # According to various specs[1][2] a SourceMap may be prefixed to force
+        # a Javascript load error.
+        # [1] https://docs.google.com/document/d/1U1RGAehQwRypUTovF1KRlpiOFze0b-_2gc6fAH0KY0k/edit#heading=h.h7yy76c5il9v
+        # [2] http://www.html5rocks.com/en/tutorials/developertools/sourcemaps/#toc-xssi
+        if body.startswith((u")]}'\n", u")]}\n")):
+            body = body.split(u'\n', 1)[1]
+
         return sourcemap_to_index(body)
     except Exception as exc:
-        logger.warn(unicode(exc))
+        # This is in debug because the product shows an error already.
+        logger.debug(six.text_type(exc), exc_info=True)
         raise UnparseableSourcemap({
-            'url': url,
+            'url': expose_url(url),
         })
 
 
@@ -497,11 +584,13 @@ class SourceProcessor(object):
         # all of these methods assume mutation on the original
         # objects rather than re-creation
         self.populate_source_cache(frames, release)
-        errors.extend(self.expand_frames(frames, release) or [])
+        expand_errors, sourcemap_applied = self.expand_frames(frames, release)
+        errors.extend(expand_errors or [])
         self.ensure_module_names(frames)
         self.fix_culprit(data, stacktraces)
         self.update_stacktraces(stacktraces)
-
+        if sourcemap_applied:
+            self.add_raw_stacktraces(data, release)
         return data
 
     def fix_culprit(self, data, stacktraces):
@@ -522,11 +611,48 @@ class SourceProcessor(object):
         for raw, interface in stacktraces:
             raw.update(interface.to_json())
 
+    def add_raw_stacktraces(self, data, release):
+        try:
+            values = data['sentry.interfaces.Exception']['values']
+        except KeyError:
+            return
+
+        for exc in values:
+            if not exc.get('stacktrace'):
+                continue
+
+            raw_frames = []
+            for frame in exc['stacktrace']['frames']:
+                if 'data' not in frame or 'raw' not in frame['data']:
+                    continue
+
+                frame = frame['data']['raw']
+
+                if frame['lineno'] is not None:
+                    source = self.get_source(frame['abs_path'], release)
+                    if source is None:
+                        logger.debug('No source found for %s', frame['abs_path'])
+                        continue
+
+                    frame['pre_context'], frame['context_line'], frame['post_context'] = get_source_context(
+                        source=source, lineno=frame['lineno'], colno=frame['colno'] or 0)
+
+            for frame in exc['stacktrace']['frames']:
+                try:
+                    # TODO(dcramer): we should refactor this to avoid this
+                    # push/pop process
+                    raw_frames.append(frame['data'].pop('raw'))
+                except KeyError:
+                    raw_frames.append(frame.copy())
+
+            exc['raw_stacktrace'] = {'frames': raw_frames}
+
     def ensure_module_names(self, frames):
         # TODO(dcramer): this doesn't really fit well with generic URLs so we
         # whitelist it to http/https
         for frame in frames:
-            if not frame.module and frame.abs_path.startswith(('http:', 'https:', 'webpack:')):
+            if not frame.module and frame.abs_path \
+               and frame.abs_path.startswith(('http:', 'https:', 'webpack:')):
                 frame.module = generate_module(frame.abs_path)
 
     def expand_frames(self, frames, release):
@@ -536,6 +662,7 @@ class SourceProcessor(object):
         cache = self.cache
         sourcemaps = self.sourcemaps
         all_errors = []
+        sourcemap_applied = False
 
         for frame in frames:
             errors = cache.get_errors(frame.abs_path)
@@ -555,7 +682,7 @@ class SourceProcessor(object):
             if sourcemap_idx and frame.colno is None:
                 all_errors.append({
                     'type': EventError.JS_NO_COLUMN,
-                    'url': force_bytes(frame.abs_path, errors='replace'),
+                    'url': expose_url(frame.abs_path),
                 })
             elif sourcemap_idx:
                 last_state = state
@@ -564,6 +691,8 @@ class SourceProcessor(object):
                     sourcemap_label = frame.abs_path
                 else:
                     sourcemap_label = sourcemap_url
+
+                sourcemap_label = expose_url(sourcemap_label)
 
                 try:
                     state = find_source(sourcemap_idx, frame.lineno, frame.colno)
@@ -578,14 +707,15 @@ class SourceProcessor(object):
                     })
 
                 # Store original data in annotation
+                # HACK(dcramer): we stuff things into raw which gets popped off
+                # later when adding the raw_stacktrace attribute.
+                raw_frame = frame.to_json()
                 frame.data = {
-                    'orig_lineno': frame.lineno,
-                    'orig_colno': frame.colno,
-                    'orig_function': frame.function,
-                    'orig_abs_path': frame.abs_path,
-                    'orig_filename': frame.filename,
+                    'raw': raw_frame,
                     'sourcemap': sourcemap_label,
                 }
+
+                sourcemap_applied = True
 
                 if state is not None:
                     abs_path = urljoin(sourcemap_url, state.src)
@@ -600,7 +730,7 @@ class SourceProcessor(object):
                     else:
                         all_errors.append({
                             'type': EventError.JS_MISSING_SOURCE,
-                            'url': force_bytes(abs_path, errors='replace'),
+                            'url': expose_url(abs_path),
                         })
 
                 if state is not None:
@@ -636,6 +766,9 @@ class SourceProcessor(object):
                         elif filename.startswith('./'):
                             frame.in_app = True
 
+                        # Update 'raw' copy to have same in_app status
+                        raw_frame['in_app'] = frame.in_app
+
                         # We want to explicitly generate a webpack module name
                         frame.module = generate_module(filename)
 
@@ -646,21 +779,21 @@ class SourceProcessor(object):
 
             elif sourcemap_url:
                 frame.data = {
-                    'sourcemap': sourcemap_url,
+                    'sourcemap': expose_url(sourcemap_url),
                 }
 
             # TODO: theoretically a minified source could point to another mapped, minified source
             frame.pre_context, frame.context_line, frame.post_context = get_source_context(
                 source=source, lineno=frame.lineno, colno=frame.colno or 0)
 
-            if not frame.context_line:
+            if not frame.context_line and source:
                 all_errors.append({
                     'type': EventError.JS_INVALID_SOURCEMAP_LOCATION,
                     'column': frame.colno,
                     'row': frame.lineno,
                     'source': frame.abs_path,
                 })
-        return all_errors
+        return all_errors, sourcemap_applied
 
     def get_source(self, filename, release):
         if filename not in self.cache:
@@ -715,10 +848,9 @@ class SourceProcessor(object):
         sourcemaps.add(sourcemap_url, sourcemap_idx)
 
         # cache any inlined sources
-        for source in sourcemap_idx.sources:
-            next_filename = urljoin(sourcemap_url, source)
-            if source in sourcemap_idx.content:
-                cache.add(next_filename, sourcemap_idx.content[source])
+        inline_sources = get_inline_content_sources(sourcemap_idx, sourcemap_url)
+        for source in inline_sources:
+            self.cache.add(*source)
 
     def populate_source_cache(self, frames, release):
         """
